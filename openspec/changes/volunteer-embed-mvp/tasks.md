@@ -25,9 +25,9 @@
 
 ## 5. Submit endpoint (staging only)
 
-- [ ] 5.1 `POST /v1/embed-tasks/submit`: validate caller holds an active lease on each submitted job id
-- [ ] 5.2 Validate vector shape (768 floats, all finite numbers); reject malformed submissions with 400 without touching reputation
-- [ ] 5.3 Persist valid submissions into `volunteer_submissions` with status `pending`
+- [x] 5.1 `POST /v1/embed-tasks/submit`: validate caller holds an active lease on each submitted job id
+- [x] 5.2 Validate vector shape (768 floats, all finite numbers); reject malformed submissions with 400 without touching reputation
+- [x] 5.3 Persist valid submissions into `volunteer_submissions` with status `pending`
 
 ## 6. Spot-check verification
 

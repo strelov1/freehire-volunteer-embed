@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -91,12 +93,14 @@ func validVector(v []float64) bool {
 // formatVector renders a []float64 as pgvector's text input format, e.g.
 // "[0.1,0.2,0.3]".
 func formatVector(v []float64) string {
-	s := "["
+	var b strings.Builder
+	b.WriteByte('[')
 	for i, x := range v {
 		if i > 0 {
-			s += ","
+			b.WriteByte(',')
 		}
-		s += fmt.Sprintf("%g", x)
+		b.WriteString(strconv.FormatFloat(x, 'g', -1, 64))
 	}
-	return s + "]"
+	b.WriteByte(']')
+	return b.String()
 }

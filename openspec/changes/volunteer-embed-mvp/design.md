@@ -42,6 +42,8 @@ Malformed submissions (wrong vector length, non-numeric values) are rejected wit
 
 **6. Lease semantics are copied from `cmd/embed`'s existing pattern, not reinvented**: claim a batch with a lease expiry; an unsubmitted claim past expiry returns to the pool automatically. This service and the internal `cmd/embed` worker both draw from the same `semantic_outbox`, so a volunteer's abandoned claim is just as recoverable as an internal worker's crash.
 
+**Discovered during implementation: `semantic_outbox`'s real schema has no claimant-identity column.** It records `claimed_at` (a timestamp) and `attempts`/`failed_at`, but not *who* claimed a row — `cmd/embed` never needed that, since it's the only claimant. This service has many claimants (one per volunteer key) and must reject a `submit` for a job the caller didn't lease. Rather than widen the external `hire` dependency with a schema change to `semantic_outbox` itself, this service keeps its own `volunteer_leases` table (`job_id` primary key, `leased_by_key_id`, `expires_at`) as the source of truth for "who currently holds this job," while still setting `semantic_outbox.claimed_at` so the internal worker correctly treats the row as claimed and doesn't race on it.
+
 ## Risks / Trade-offs
 
 - **[Risk] A volunteer builds a long clean streak, then starts submitting bad vectors.** Because checks get rarer over time, some bad vectors could land before the next spot-check catches the pattern and bans the key. → *Mitigation:* accepted trade-off for v1; the check-rate floor (never 0%) bounds how long this can go undetected, and a later version could re-verify a random sample of already-promoted rows retroactively if this proves to be a real problem in practice.

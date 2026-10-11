@@ -70,6 +70,9 @@ func TestLoad_OptionalVarsDefaultWhenUnset(t *testing.T) {
 	if cfg.CheckDivisorStage2 != 30 {
 		t.Errorf("CheckDivisorStage2 default = %d, want 30", cfg.CheckDivisorStage2)
 	}
+	if cfg.MaxLeaseBatchSize != 50 {
+		t.Errorf("MaxLeaseBatchSize default = %d, want 50", cfg.MaxLeaseBatchSize)
+	}
 }
 
 func TestLoad_OptionalVarsOverrideWhenSet(t *testing.T) {

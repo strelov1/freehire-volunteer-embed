@@ -19,6 +19,7 @@ type Config struct {
 	FullCheckThreshold int
 	CheckDivisorStage1 int
 	CheckDivisorStage2 int
+	MaxLeaseBatchSize  int
 }
 
 func Load() (Config, error) {
@@ -57,6 +58,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxLeaseBatchSize, err := intEnvOrDefault("LEASE_BATCH_SIZE_MAX", 50)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		DatabaseURL:        databaseURL,
@@ -66,6 +71,7 @@ func Load() (Config, error) {
 		FullCheckThreshold: fullCheckThreshold,
 		CheckDivisorStage1: checkDivisorStage1,
 		CheckDivisorStage2: checkDivisorStage2,
+		MaxLeaseBatchSize:  maxLeaseBatchSize,
 	}, nil
 }
 

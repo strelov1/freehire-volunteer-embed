@@ -136,3 +136,29 @@ func TestAuthenticate_MissingBearerPrefix_ReturnsUnauthorized(t *testing.T) {
 		t.Errorf("err = %v, want ErrUnauthorized", err)
 	}
 }
+
+func TestAuthenticate_LowercaseBearerScheme_StillAuthenticates(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	var userID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email) VALUES ('case@example.com') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	token := "fhk_lowercasebearer"
+	var keyID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO api_keys (user_id, name, token_hash, token_prefix, scope)
+		VALUES ($1, 'k', $2, 'fhk_lowe', 'embed') RETURNING id
+	`, userID, HashToken(token)).Scan(&keyID); err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+
+	gotID, err := Authenticate(ctx, pool, "bearer "+token)
+	if err != nil {
+		t.Fatalf("Authenticate with lowercase scheme: %v", err)
+	}
+	if gotID != keyID {
+		t.Errorf("Authenticate returned key %d, want %d", gotID, keyID)
+	}
+}

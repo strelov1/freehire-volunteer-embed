@@ -13,9 +13,9 @@
 
 ## 3. Authentication
 
-- [ ] 3.1 Implement bearer-token validation: hash incoming `fhk_...` token, look up `api_keys` by hash, require non-expired/non-revoked and `scope = 'embed'`
-- [ ] 3.2 Implement banned-key check against `volunteer_reputation.banned_at` as part of auth, rejecting with 401
-- [ ] 3.3 Middleware wiring `Authorization: Bearer` parsing onto both endpoints
+- [x] 3.1 Implement bearer-token validation: hash incoming `fhk_...` token, look up `api_keys` by hash, require non-expired/non-revoked and `scope = 'embed'`
+- [x] 3.2 Implement banned-key check against `volunteer_reputation.banned_at` as part of auth, rejecting with 401
+- [x] 3.3 Middleware wiring `Authorization: Bearer` parsing onto both endpoints
 
 ## 4. Lease endpoint
 

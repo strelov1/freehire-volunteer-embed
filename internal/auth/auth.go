@@ -33,10 +33,11 @@ func HashToken(token string) string {
 // Authenticate validates an "Authorization: Bearer fhk_..." header value and
 // returns the resolved api_keys.id on success.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, authorizationHeader string) (int64, error) {
-	token, ok := strings.CutPrefix(authorizationHeader, "Bearer ")
-	if !ok || token == "" {
+	const scheme = "Bearer "
+	if len(authorizationHeader) <= len(scheme) || !strings.EqualFold(authorizationHeader[:len(scheme)], scheme) {
 		return 0, ErrUnauthorized
 	}
+	token := authorizationHeader[len(scheme):]
 
 	key, found, err := hiredata.LookupAPIKeyByHash(ctx, pool, HashToken(token))
 	if err != nil {

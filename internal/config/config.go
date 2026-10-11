@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -44,13 +45,38 @@ func Load() (Config, error) {
 		listenAddr = v
 	}
 
+	fullCheckThreshold, err := intEnvOrDefault("FULL_CHECK_THRESHOLD", 20)
+	if err != nil {
+		return Config{}, err
+	}
+	checkDivisorStage1, err := intEnvOrDefault("CHECK_DIVISOR_STAGE1", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	checkDivisorStage2, err := intEnvOrDefault("CHECK_DIVISOR_STAGE2", 30)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		DatabaseURL:        databaseURL,
 		TrustedTEIURL:      trustedTEIURL,
 		ListenAddr:         listenAddr,
 		LeaseDuration:      leaseDuration,
-		FullCheckThreshold: 20,
-		CheckDivisorStage1: 10,
-		CheckDivisorStage2: 30,
+		FullCheckThreshold: fullCheckThreshold,
+		CheckDivisorStage1: checkDivisorStage1,
+		CheckDivisorStage2: checkDivisorStage2,
 	}, nil
+}
+
+func intEnvOrDefault(name string, fallback int) (int, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s invalid: %w", name, err)
+	}
+	return n, nil
 }

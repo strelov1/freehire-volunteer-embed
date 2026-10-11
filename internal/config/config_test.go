@@ -76,6 +76,9 @@ func TestLoad_OptionalVarsOverrideWhenSet(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("LISTEN_ADDR", ":9090")
 	t.Setenv("LEASE_DURATION", "2m")
+	t.Setenv("FULL_CHECK_THRESHOLD", "5")
+	t.Setenv("CHECK_DIVISOR_STAGE1", "7")
+	t.Setenv("CHECK_DIVISOR_STAGE2", "40")
 
 	cfg, err := Load()
 
@@ -87,5 +90,25 @@ func TestLoad_OptionalVarsOverrideWhenSet(t *testing.T) {
 	}
 	if cfg.LeaseDuration != 2*time.Minute {
 		t.Errorf("LeaseDuration = %v, want 2m", cfg.LeaseDuration)
+	}
+	if cfg.FullCheckThreshold != 5 {
+		t.Errorf("FullCheckThreshold = %d, want 5", cfg.FullCheckThreshold)
+	}
+	if cfg.CheckDivisorStage1 != 7 {
+		t.Errorf("CheckDivisorStage1 = %d, want 7", cfg.CheckDivisorStage1)
+	}
+	if cfg.CheckDivisorStage2 != 40 {
+		t.Errorf("CheckDivisorStage2 = %d, want 40", cfg.CheckDivisorStage2)
+	}
+}
+
+func TestLoad_InvalidCheckDivisorStage1_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("CHECK_DIVISOR_STAGE1", "not-a-number")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-numeric CHECK_DIVISOR_STAGE1, got nil")
 	}
 }

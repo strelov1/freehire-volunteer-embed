@@ -1,8 +1,8 @@
 ## 1. Project scaffold
 
-- [ ] 1.1 Initialize Go module, directory layout (`cmd/`, `internal/`), linting/test tooling consistent with the `hire` and `freehire-cli` repos
-- [ ] 1.2 Config loading (DB connection string, trusted TEI URL, lease duration, check-rate parameters, listen address) from env vars
-- [ ] 1.3 Postgres connection pool setup, pointed at freehire's production database via a scoped role (connection string supplied via config, not hardcoded)
+- [x] 1.1 Initialize Go module, directory layout (`cmd/`, `internal/`), linting/test tooling consistent with the `hire` and `freehire-cli` repos
+- [x] 1.2 Config loading (DB connection string, trusted TEI URL, lease duration, check-rate parameters, listen address) from env vars
+- [x] 1.3 Postgres connection pool setup, pointed at freehire's production database via a scoped role (connection string supplied via config, not hardcoded)
 
 ## 2. Data model
 

@@ -21,6 +21,28 @@ func TestLoad_MissingDatabaseURL_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestLoad_ZeroLeaseBatchSizeMax_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LEASE_BATCH_SIZE_MAX", "0")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for LEASE_BATCH_SIZE_MAX=0, got nil (a zero max would make every lease request fail)")
+	}
+}
+
+func TestLoad_NegativeLeaseBatchSizeMax_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LEASE_BATCH_SIZE_MAX", "-5")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a negative LEASE_BATCH_SIZE_MAX, got nil")
+	}
+}
+
 func TestLoad_MissingTrustedTEIURL_ReturnsError(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/hire")
 

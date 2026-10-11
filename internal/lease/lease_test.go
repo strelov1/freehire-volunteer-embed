@@ -146,6 +146,35 @@ func TestClaim_FailedJob_IsNeverClaimed(t *testing.T) {
 	}
 }
 
+func TestClaim_PrefersOldestPostedJobFirst(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	olderJobID := seedJob(t, pool, "old-backlog-job", "old")
+	newerJobID := seedJob(t, pool, "fresh-job", "new")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO semantic_outbox (job_id, target_model, job_posted_at) VALUES ($1, 'e5', now() - interval '30 days')
+	`, olderJobID); err != nil {
+		t.Fatalf("seed older outbox row: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO semantic_outbox (job_id, target_model, job_posted_at) VALUES ($1, 'e5', now())
+	`, newerJobID); err != nil {
+		t.Fatalf("seed newer outbox row: %v", err)
+	}
+
+	claimed, err := Claim(ctx, pool, 1, 1, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("len(claimed) = %d, want 1", len(claimed))
+	}
+	if claimed[0].JobID != olderJobID {
+		t.Errorf("claimed job %d, want the older backlog job %d (this service exists to drain the old backlog, not prioritize fresh postings)", claimed[0].JobID, olderJobID)
+	}
+}
+
 func TestClaim_RecordsLeaseholderInVolunteerLeases(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()

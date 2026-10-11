@@ -17,11 +17,13 @@ type ClaimedJob struct {
 	Text  string
 }
 
-// Claim atomically claims up to batchSize pending jobs for keyID, skipping
-// rows already claimed within leaseDuration (by this service or hire's own
-// cmd/embed worker, since both read/write semantic_outbox.claimed_at) and
-// rows permanently failed. Returns an empty slice, not an error, when
-// nothing is claimable.
+// Claim atomically claims up to batchSize pending jobs for keyID, oldest
+// job_posted_at first — this service exists to drain the backlog, not to
+// race hire's own worker for freshly posted jobs. It skips rows already
+// claimed within leaseDuration (by this service or hire's own cmd/embed
+// worker, since both read/write semantic_outbox.claimed_at) and rows
+// permanently failed. Returns an empty slice, not an error, when nothing is
+// claimable.
 func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, leaseDuration time.Duration) ([]ClaimedJob, error) {
 	if batchSize <= 0 {
 		return nil, fmt.Errorf("lease: batchSize must be positive, got %d", batchSize)
@@ -38,7 +40,7 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, 
 			SELECT id, job_id FROM semantic_outbox
 			WHERE failed_at IS NULL
 			  AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))
-			ORDER BY job_posted_at DESC NULLS LAST, job_id DESC
+			ORDER BY job_posted_at ASC NULLS FIRST, job_id ASC
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)

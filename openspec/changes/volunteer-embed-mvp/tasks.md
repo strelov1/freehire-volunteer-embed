@@ -19,9 +19,9 @@
 
 ## 4. Lease endpoint
 
-- [ ] 4.1 `POST /v1/embed-tasks/lease`: atomically claim a batch of pending `semantic_outbox` rows not currently under an active lease, tag with caller's key id and lease expiry
-- [ ] 4.2 Lease expiry sweep: expired, unsubmitted leases become claimable again (reuse `semantic_outbox`'s existing lease-timeout convention)
-- [ ] 4.3 Batch size limit (configurable, small default) and empty-queue response handling
+- [x] 4.1 `POST /v1/embed-tasks/lease`: atomically claim a batch of pending `semantic_outbox` rows not currently under an active lease, tag with caller's key id and lease expiry
+- [x] 4.2 Lease expiry sweep: expired, unsubmitted leases become claimable again (reuse `semantic_outbox`'s existing lease-timeout convention)
+- [x] 4.3 Batch size limit (configurable, small default) and empty-queue response handling
 
 ## 5. Submit endpoint (staging only)
 

@@ -62,6 +62,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if maxLeaseBatchSize <= 0 {
+		return Config{}, fmt.Errorf("config: LEASE_BATCH_SIZE_MAX must be positive, got %d", maxLeaseBatchSize)
+	}
 
 	return Config{
 		DatabaseURL:        databaseURL,

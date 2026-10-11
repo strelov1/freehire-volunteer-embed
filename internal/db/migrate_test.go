@@ -1,9 +1,10 @@
-package db
+package db_test
 
 import (
 	"context"
 	"testing"
 
+	"github.com/strelov1/freehire-volunteer-embed/internal/db"
 	"github.com/strelov1/freehire-volunteer-embed/internal/testdb"
 )
 
@@ -11,7 +12,7 @@ func TestApplyMigrations_CreatesOwnedTables(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
-	if err := ApplyMigrations(ctx, pool); err != nil {
+	if err := db.ApplyMigrations(ctx, pool); err != nil {
 		t.Fatalf("ApplyMigrations: %v", err)
 	}
 
@@ -34,10 +35,10 @@ func TestApplyMigrations_IsIdempotent(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
-	if err := ApplyMigrations(ctx, pool); err != nil {
+	if err := db.ApplyMigrations(ctx, pool); err != nil {
 		t.Fatalf("first ApplyMigrations: %v", err)
 	}
-	if err := ApplyMigrations(ctx, pool); err != nil {
+	if err := db.ApplyMigrations(ctx, pool); err != nil {
 		t.Fatalf("second ApplyMigrations should be a no-op, got error: %v", err)
 	}
 }

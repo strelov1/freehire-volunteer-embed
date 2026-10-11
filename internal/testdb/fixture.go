@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/db"
 )
 
 // hireFixtureSQL mirrors the subset of hire's production schema this service
@@ -83,10 +84,16 @@ func Setup(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, hireFixtureSQL); err != nil {
 		t.Fatalf("testdb: apply hire fixture schema: %v", err)
 	}
+	if err := db.ApplyMigrations(ctx, pool); err != nil {
+		t.Fatalf("testdb: apply this service's own migrations: %v", err)
+	}
 
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `
-			TRUNCATE semantic_outbox, job_semantic_chunks, jobs, api_keys, users CASCADE;
+			TRUNCATE
+				semantic_outbox, job_semantic_chunks, jobs, api_keys, users,
+				volunteer_submissions, volunteer_reputation, volunteer_leases
+			CASCADE;
 		`)
 	})
 

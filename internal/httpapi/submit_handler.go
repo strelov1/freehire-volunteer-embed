@@ -34,6 +34,8 @@ func statusString(s submit.Status) string {
 		return "not_leased"
 	case submit.StatusInvalidVector:
 		return "invalid_vector"
+	case submit.StatusError:
+		return "error"
 	default:
 		return "unknown"
 	}
@@ -60,11 +62,7 @@ func SubmitHandler(pool *pgxpool.Pool) http.Handler {
 			items[i] = submit.Item{JobID: s.JobID, Vector: s.Vector}
 		}
 
-		results, err := submit.Submit(r.Context(), pool, keyID, items)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
+		results := submit.Submit(r.Context(), pool, keyID, items)
 
 		resp := submitResponseBody{Results: make([]submitResultItem, len(results))}
 		for i, r := range results {

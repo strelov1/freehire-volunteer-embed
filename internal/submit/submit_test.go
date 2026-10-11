@@ -43,10 +43,7 @@ func TestSubmit_ActiveLeaseValidVector_Accepted(t *testing.T) {
 	const keyID = int64(1)
 	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
 
-	results, err := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}})
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}
@@ -74,10 +71,7 @@ func TestSubmit_NoLeaseHeld_RejectedNotLeased(t *testing.T) {
 		t.Fatalf("seed job: %v", err)
 	}
 
-	results, err := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	results := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}})
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -96,10 +90,7 @@ func TestSubmit_LeaseHeldByDifferentKey_RejectedNotLeased(t *testing.T) {
 	ctx := context.Background()
 	jobID := seedLeasedJob(t, pool, 999, time.Now().Add(5*time.Minute))
 
-	results, err := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	results := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}})
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -111,10 +102,7 @@ func TestSubmit_ExpiredLease_RejectedNotLeased(t *testing.T) {
 	const keyID = int64(1)
 	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(-1*time.Minute))
 
-	results, err := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}})
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -126,10 +114,7 @@ func TestSubmit_WrongVectorLength_RejectedInvalidNoReputationImpact(t *testing.T
 	const keyID = int64(1)
 	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
 
-	results, err := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: []float64{0.1, 0.2}}})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: []float64{0.1, 0.2}}})
 	if results[0].Status != StatusInvalidVector {
 		t.Errorf("Status = %v, want StatusInvalidVector", results[0].Status)
 	}
@@ -152,10 +137,7 @@ func TestSubmit_NonFiniteVectorValue_RejectedInvalid(t *testing.T) {
 	badVector := fixtureVector()
 	badVector[10] = math.NaN()
 
-	results, err := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: badVector}})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: badVector}})
 	if results[0].Status != StatusInvalidVector {
 		t.Errorf("Status = %v, want StatusInvalidVector", results[0].Status)
 	}
@@ -174,13 +156,10 @@ func TestSubmit_MixedBatch_EachItemHandledIndependently(t *testing.T) {
 		t.Fatalf("seed job: %v", err)
 	}
 
-	results, err := Submit(ctx, pool, keyID, []Item{
+	results := Submit(ctx, pool, keyID, []Item{
 		{JobID: goodJobID, Vector: fixtureVector()},
 		{JobID: unleashedJobID, Vector: fixtureVector()},
 	})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2", len(results))
 	}
@@ -189,5 +168,28 @@ func TestSubmit_MixedBatch_EachItemHandledIndependently(t *testing.T) {
 	}
 	if results[1].Status != StatusNotLeased {
 		t.Errorf("results[1].Status = %v, want StatusNotLeased", results[1].Status)
+	}
+}
+
+func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
+	pool := testdb.Setup(t)
+	const keyID = int64(1)
+	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulates a transient infra failure (e.g. client disconnect, pool exhaustion)
+
+	results := Submit(ctx, pool, keyID, []Item{
+		{JobID: jobID, Vector: fixtureVector()},
+		{JobID: jobID, Vector: fixtureVector()},
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2 (a per-item outcome even when the DB call fails, not a nil/abort)", len(results))
+	}
+	for i, r := range results {
+		if r.Status != StatusError {
+			t.Errorf("results[%d].Status = %v, want StatusError", i, r.Status)
+		}
 	}
 }

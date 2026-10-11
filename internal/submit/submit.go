@@ -6,7 +6,6 @@ package submit
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -22,6 +21,10 @@ const (
 	StatusAccepted Status = iota
 	StatusNotLeased
 	StatusInvalidVector
+	// StatusError means an infrastructure problem (DB unavailable, context
+	// cancelled, etc.) prevented resolving this item. Unlike the other
+	// statuses it is not a final answer — the caller should retry this item.
+	StatusError
 )
 
 type Item struct {
@@ -34,24 +37,21 @@ type Result struct {
 	Status Status
 }
 
-// Submit processes each item independently: a rejection in one item does
-// not affect the others, and never touches reputation (reputation only
-// changes as a result of spot-check verification, not at submission time).
-func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item) ([]Result, error) {
+// Submit processes each item independently: a rejection OR an infrastructure
+// error on one item never affects the others, and submission never touches
+// reputation (reputation only changes as a result of spot-check
+// verification, not at submission time).
+func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item) []Result {
 	results := make([]Result, len(items))
 	for i, item := range items {
-		status, err := submitOne(ctx, pool, keyID, item)
-		if err != nil {
-			return nil, fmt.Errorf("submit: job %d: %w", item.JobID, err)
-		}
-		results[i] = Result{JobID: item.JobID, Status: status}
+		results[i] = Result{JobID: item.JobID, Status: submitOne(ctx, pool, keyID, item)}
 	}
-	return results, nil
+	return results
 }
 
-func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) (Status, error) {
+func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) Status {
 	if !validVector(item.Vector) {
-		return StatusInvalidVector, nil
+		return StatusInvalidVector
 	}
 
 	var leased bool
@@ -62,20 +62,20 @@ func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) 
 		)
 	`, item.JobID, keyID).Scan(&leased)
 	if err != nil {
-		return 0, fmt.Errorf("checking lease ownership: %w", err)
+		return StatusError
 	}
 	if !leased {
-		return StatusNotLeased, nil
+		return StatusNotLeased
 	}
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, status)
 		VALUES ($1, $2, $3, 'pending')
 	`, item.JobID, keyID, formatVector(item.Vector)); err != nil {
-		return 0, fmt.Errorf("storing submission: %w", err)
+		return StatusError
 	}
 
-	return StatusAccepted, nil
+	return StatusAccepted
 }
 
 func validVector(v []float64) bool {

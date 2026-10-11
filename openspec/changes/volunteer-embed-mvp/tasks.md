@@ -6,10 +6,10 @@
 
 ## 2. Data model
 
-- [ ] 2.1 Migration: create `volunteer_submissions` (job id, submitting key id, vector, status `pending`/`verified`/`rejected`, timestamps)
-- [ ] 2.2 Migration: create `volunteer_reputation` (api key id, consecutive_passes, consecutive_fails, banned_at nullable, timestamps)
-- [ ] 2.3 Migration: create `volunteer_leases` (job id primary key, leased_by_key_id, expires_at) — this service's own record of who currently holds a `semantic_outbox` claim, since that table has no claimant-identity column (discovered during implementation; see design.md Decision 6)
-- [ ] 2.4 Read-only query layer against existing `semantic_outbox`, its backing job text, and `api_keys` (no migrations — these tables are owned by `hire`)
+- [x] 2.1 Migration: create `volunteer_submissions` (job id, submitting key id, vector, status `pending`/`verified`/`rejected`, timestamps)
+- [x] 2.2 Migration: create `volunteer_reputation` (api key id, consecutive_passes, consecutive_fails, banned_at nullable, timestamps)
+- [x] 2.3 Migration: create `volunteer_leases` (job id primary key, leased_by_key_id, expires_at) — this service's own record of who currently holds a `semantic_outbox` claim, since that table has no claimant-identity column (discovered during implementation; see design.md Decision 6)
+- [x] 2.4 Read-only query layer against existing `semantic_outbox`, its backing job text, and `api_keys` (no migrations — these tables are owned by `hire`)
 
 ## 3. Authentication
 

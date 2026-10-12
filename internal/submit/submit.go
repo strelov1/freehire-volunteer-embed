@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
 	"github.com/strelov1/freehire-volunteer-embed/internal/hiredata"
+	"github.com/strelov1/freehire-volunteer-embed/internal/lease"
 	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
 	"github.com/strelov1/freehire-volunteer-embed/internal/verify"
 )
@@ -107,11 +108,17 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 
 	var newStatus string
 	switch outcome {
-	case verify.OutcomeVerifiedWithoutCheck, verify.OutcomeVerifiedPassedCheck:
+	case verify.OutcomeVerifiedWithoutCheck:
 		newStatus = "verified"
+		_ = reputation.RecordSkipped(ctx, pool, keyID)
+	case verify.OutcomeVerifiedPassedCheck:
+		newStatus = "verified"
+		_ = reputation.RecordPassed(ctx, pool, keyID)
 	case verify.OutcomeRejectedFailedCheck:
 		newStatus = "rejected"
-	default: // OutcomeDeferredTEIUnavailable: leave pending
+		_ = reputation.RecordFailed(ctx, pool, keyID)
+		_ = lease.Release(ctx, pool, item.JobID)
+	default: // OutcomeDeferredTEIUnavailable: leave pending, no reputation change
 		return
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
+	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
 	"github.com/strelov1/freehire-volunteer-embed/internal/testdb"
 )
 
@@ -222,6 +223,14 @@ func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T
 	if status != "verified" {
 		t.Errorf("stored status = %q, want verified", status)
 	}
+
+	var consecutivePasses int
+	if err := pool.QueryRow(ctx, `SELECT consecutive_passes FROM volunteer_reputation WHERE key_id = $1`, keyID).Scan(&consecutivePasses); err != nil {
+		t.Fatalf("querying volunteer_reputation: %v", err)
+	}
+	if consecutivePasses != 1 {
+		t.Errorf("consecutive_passes = %d, want 1 (a passed check must be recorded in reputation)", consecutivePasses)
+	}
 }
 
 func TestSubmit_SynchronousVerification_MismatchedVector_EndsRejected(t *testing.T) {
@@ -261,6 +270,68 @@ func TestSubmit_SynchronousVerification_MismatchedVector_EndsRejected(t *testing
 	}
 	if status != "rejected" {
 		t.Errorf("stored status = %q, want rejected", status)
+	}
+
+	var consecutiveFails int
+	if err := pool.QueryRow(ctx, `SELECT consecutive_fails FROM volunteer_reputation WHERE key_id = $1`, keyID).Scan(&consecutiveFails); err != nil {
+		t.Fatalf("querying volunteer_reputation: %v", err)
+	}
+	if consecutiveFails != 1 {
+		t.Errorf("consecutive_fails = %d, want 1 (a failed check must be recorded in reputation)", consecutiveFails)
+	}
+
+	var leaseCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM volunteer_leases WHERE job_id = $1`, jobID).Scan(&leaseCount); err != nil {
+		t.Fatalf("querying volunteer_leases: %v", err)
+	}
+	if leaseCount != 0 {
+		t.Errorf("expected the lease to be released back to the pool on a failed check, found %d leases still held", leaseCount)
+	}
+}
+
+func TestSubmit_ThirdConsecutiveFailure_BansTheKey(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO volunteer_reputation (key_id, consecutive_fails) VALUES ($1, 2)
+	`, keyID); err != nil {
+		t.Fatalf("seed reputation: %v", err)
+	}
+
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ('third-strike-job', 'the real job text') RETURNING id`,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO volunteer_leases (job_id, leased_by_key_id, expires_at) VALUES ($1, $2, $3)`,
+		jobID, keyID, time.Now().Add(5*time.Minute),
+	); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+
+	mismatched := make([]float64, 768)
+	mismatched[0] = 1
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([][]float64{mismatched})
+	}))
+	defer server.Close()
+
+	// This key is already past the full-check phase with consecutive_fails=2
+	// and consecutive_passes=0, so the fix for "failure restores full
+	// checking" (consecutivePasses &lt; FullCheckThreshold) guarantees this
+	// third submission is actually checked, not skipped.
+	Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}}, server.URL, testCfg())
+
+	banned, err := reputation.IsBanned(ctx, pool, keyID)
+	if err != nil {
+		t.Fatalf("IsBanned: %v", err)
+	}
+	if !banned {
+		t.Error("expected the key to be banned after its 3rd consecutive failure")
 	}
 }
 

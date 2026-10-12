@@ -23,9 +23,9 @@ freehire's semantic search backlog (`semantic_outbox`) currently sits at ~98k un
 
 ## Impact
 
-- **New production database objects** (in freehire's existing Postgres, via a scoped role): tables `volunteer_submissions`, `volunteer_reputation`, owned by this service.
+- **New production database objects** (in freehire's existing Postgres, via a scoped role): tables `volunteer_submissions`, `volunteer_reputation`, `volunteer_leases`, owned by this service. `volunteer_leases` exists because `semantic_outbox` itself records only *that* a row is claimed, not *by whom* — this service needs the latter to have many concurrent claimants.
 - **Read access** to freehire's `semantic_outbox`, the job text backing it, and `api_keys` (for bearer-token validation using the same hash scheme freehire already uses).
-- **Write access** limited to: the two new tables, and a narrow promote-path `UPDATE`/`INSERT` into `job_semantic_chunks` plus clearing the corresponding `semantic_outbox` row.
+- **Write access** limited to: the three new tables, and a narrow promote-path `UPDATE`/`INSERT` into `job_semantic_chunks` plus clearing the corresponding `semantic_outbox` row.
 - **Calls out to** freehire's existing trusted TEI embedding endpoint for spot-check re-computation.
 - **External dependency**: a small, separately-tracked change in the `hire` repo (CHECK-constraint migration for `api_keys.scope`); not implemented in this repository.
 - **New public-facing HTTP surface**: this service's `lease`/`submit` endpoints are reachable from the open internet; hosting/TLS is an open question resolved in `design.md`.

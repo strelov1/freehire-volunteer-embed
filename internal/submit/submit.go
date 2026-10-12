@@ -6,6 +6,7 @@ package submit
 
 import (
 	"context"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -110,22 +111,32 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 	switch outcome {
 	case verify.OutcomeVerifiedWithoutCheck:
 		newStatus = "verified"
-		_ = reputation.RecordSkipped(ctx, pool, keyID)
+		if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
+			log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
+		}
 	case verify.OutcomeVerifiedPassedCheck:
 		newStatus = "verified"
-		_ = reputation.RecordPassed(ctx, pool, keyID)
+		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
+			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, submissionID, err)
+		}
 	case verify.OutcomeRejectedFailedCheck:
 		newStatus = "rejected"
-		_ = reputation.RecordFailed(ctx, pool, keyID)
-		_ = lease.Release(ctx, pool, item.JobID)
+		if err := reputation.RecordFailed(ctx, pool, keyID); err != nil {
+			log.Printf("submit: record failed for key %d, submission %d: %v", keyID, submissionID, err)
+		}
+		if err := lease.Release(ctx, pool, item.JobID, keyID); err != nil {
+			log.Printf("submit: release lease for job %d, key %d: %v", item.JobID, keyID, err)
+		}
 	default: // OutcomeDeferredTEIUnavailable: leave pending, no reputation change
 		return
 	}
 
-	_, _ = pool.Exec(ctx,
+	if _, err := pool.Exec(ctx,
 		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
 		newStatus, submissionID,
-	)
+	); err != nil {
+		log.Printf("submit: finalize submission %d as %s: %v", submissionID, newStatus, err)
+	}
 }
 
 func validVector(v []float64) bool {

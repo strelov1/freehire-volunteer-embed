@@ -39,9 +39,9 @@
 
 ## 7. Reputation bookkeeping
 
-- [ ] 7.1 On verified pass: increment `consecutive_passes`, reset `consecutive_fails`
-- [ ] 7.2 On spot-check failure: increment `consecutive_fails`, reset `consecutive_passes`, release the job's lease back to the pool
-- [ ] 7.3 On `consecutive_fails` reaching 3: set `banned_at`, causing subsequent auth checks to reject the key
+- [x] 7.1 On verified pass: increment `consecutive_passes`, reset `consecutive_fails`
+- [x] 7.2 On spot-check failure: increment `consecutive_fails`, reset `consecutive_passes`, release the job's lease back to the pool
+- [x] 7.3 On `consecutive_fails` reaching 3: set `banned_at`, causing subsequent auth checks to reject the key
 
 ## 8. Verified promotion
 

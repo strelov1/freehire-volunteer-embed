@@ -21,6 +21,7 @@ This service lets anyone on the internet donate embedding compute against that s
 - Sybil resistance beyond "needs a real freehire account with a confirmed email" — a determined attacker with many accounts is not defended against in v1.
 - Auto-scaling, multi-region deployment, or high-availability hosting.
 - Any change to freehire's search-ranking or embedding model itself.
+- Multi-chunk job descriptions. `job_semantic_chunks` supports several chunks per job (`chunk_index`), but this service's `lease`/`submit` protocol carries exactly one text and one vector per job. Promotion always writes `chunk_index = 0`. A job whose description is long enough that `cmd/embed` would split it into more than one chunk is not correctly representable through this service in v1 — out of scope, not silently handled.
 
 ## Decisions
 

@@ -1,0 +1,49 @@
+// Package promote writes a verified volunteer embedding into freehire's
+// live job_semantic_chunks table and clears the corresponding
+// semantic_outbox row — the only place this service touches hire's search
+// index, and only after verification (see design.md Decision 3).
+package promote
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/pgvec"
+)
+
+// chunkIndex is always 0: this service's lease/submit protocol carries one
+// text and one vector per job, never multiple chunks (design.md Non-Goals).
+const chunkIndex = 0
+
+// Promote writes vec as job_id's chunk 0 and clears its semantic_outbox
+// row, in one transaction. It is idempotent: a job already promoted is
+// left untouched (its first promotion wins) rather than overwritten by a
+// later, possibly stale, re-submission — a destructive overwrite here
+// would silently corrupt freehire's live search index (design.md Context).
+func Promote(ctx context.Context, pool *pgxpool.Pool, jobID int64, vec []float64) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("promote: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO job_semantic_chunks (job_id, chunk_index, embedding)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (job_id, chunk_index) DO NOTHING
+	`, jobID, chunkIndex, pgvec.Format(vec)); err != nil {
+		return fmt.Errorf("promote: insert chunk for job %d: %w", jobID, err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM semantic_outbox WHERE job_id = $1`, jobID,
+	); err != nil {
+		return fmt.Errorf("promote: clear outbox for job %d: %w", jobID, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("promote: commit: %w", err)
+	}
+	return nil
+}

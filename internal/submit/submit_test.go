@@ -204,6 +204,11 @@ func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T
 	); err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5')`, jobID,
+	); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
 
 	submitted := fixtureVector()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +235,23 @@ func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T
 	}
 	if consecutivePasses != 1 {
 		t.Errorf("consecutive_passes = %d, want 1 (a passed check must be recorded in reputation)", consecutivePasses)
+	}
+
+	// End-to-end proof this actually reaches freehire's live search table,
+	// not just the staging table.
+	var chunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM job_semantic_chunks WHERE job_id = $1`, jobID).Scan(&chunkCount); err != nil {
+		t.Fatalf("querying job_semantic_chunks: %v", err)
+	}
+	if chunkCount != 1 {
+		t.Errorf("job_semantic_chunks rows for job = %d, want 1 (verified submission must be promoted)", chunkCount)
+	}
+	var outboxCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM semantic_outbox WHERE job_id = $1`, jobID).Scan(&outboxCount); err != nil {
+		t.Fatalf("querying semantic_outbox: %v", err)
+	}
+	if outboxCount != 0 {
+		t.Errorf("semantic_outbox rows for job = %d, want 0 (promotion must clear the outbox entry)", outboxCount)
 	}
 }
 

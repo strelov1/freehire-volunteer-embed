@@ -8,13 +8,13 @@ import (
 	"context"
 	"log"
 	"math"
-	"strconv"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
 	"github.com/strelov1/freehire-volunteer-embed/internal/hiredata"
 	"github.com/strelov1/freehire-volunteer-embed/internal/lease"
+	"github.com/strelov1/freehire-volunteer-embed/internal/pgvec"
+	"github.com/strelov1/freehire-volunteer-embed/internal/promote"
 	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
 	"github.com/strelov1/freehire-volunteer-embed/internal/verify"
 )
@@ -81,7 +81,7 @@ func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, 
 		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, status)
 		VALUES ($1, $2, $3, 'pending')
 		RETURNING id
-	`, item.JobID, keyID, formatVector(item.Vector)).Scan(&submissionID); err != nil {
+	`, item.JobID, keyID, pgvec.Format(item.Vector)).Scan(&submissionID); err != nil {
 		return StatusError
 	}
 
@@ -114,10 +114,16 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 		if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
 			log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
 		}
+		if err := promote.Promote(ctx, pool, item.JobID, item.Vector); err != nil {
+			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
+		}
 	case verify.OutcomeVerifiedPassedCheck:
 		newStatus = "verified"
 		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
 			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, submissionID, err)
+		}
+		if err := promote.Promote(ctx, pool, item.JobID, item.Vector); err != nil {
+			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
 		}
 	case verify.OutcomeRejectedFailedCheck:
 		newStatus = "rejected"
@@ -149,19 +155,4 @@ func validVector(v []float64) bool {
 		}
 	}
 	return true
-}
-
-// formatVector renders a []float64 as pgvector's text input format, e.g.
-// "[0.1,0.2,0.3]".
-func formatVector(v []float64) string {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i, x := range v {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.FormatFloat(x, 'g', -1, 64))
-	}
-	b.WriteByte(']')
-	return b.String()
 }

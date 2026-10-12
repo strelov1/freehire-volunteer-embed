@@ -31,11 +31,11 @@
 
 ## 6. Spot-check verification
 
-- [ ] 6.1 Check-rate decision function: given a key's `volunteer_reputation`, decide whether a given submission is spot-checked (100% under 20 total checks, stepped-down rate with a non-zero floor afterward)
-- [ ] 6.2 Trusted-TEI client: re-embed a job's text via freehire's existing TEI endpoint
-- [ ] 6.3 Cosine similarity comparison between submitted and trusted vectors, threshold 0.99, deciding verified vs rejected
-- [ ] 6.4 Handle trusted-TEI unavailability by leaving the submission `pending` and changing no reputation counters
-- [ ] 6.5 Submissions not selected for checking are marked `verified` directly (trust-on-track-record path)
+- [x] 6.1 Check-rate decision function: given a key's `volunteer_reputation`, decide whether a given submission is spot-checked (100% under 20 total checks, stepped-down rate with a non-zero floor afterward)
+- [x] 6.2 Trusted-TEI client: re-embed a job's text via freehire's existing TEI endpoint
+- [x] 6.3 Cosine similarity comparison between submitted and trusted vectors, threshold 0.99, deciding verified vs rejected
+- [x] 6.4 Handle trusted-TEI unavailability by leaving the submission `pending` and changing no reputation counters
+- [x] 6.5 Submissions not selected for checking are marked `verified` directly (trust-on-track-record path)
 
 ## 7. Reputation bookkeeping
 

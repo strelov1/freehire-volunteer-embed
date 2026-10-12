@@ -2,13 +2,28 @@ package submit
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/config"
 	"github.com/strelov1/freehire-volunteer-embed/internal/testdb"
 )
+
+// unreachableTEIURL lets these tests exercise acceptance/validation/lease
+// logic without a real TEI server; the verification step they trigger
+// simply defers (leaves the row pending), which is already the expected
+// outcome asserted below. Verification itself is tested in
+// TestSubmit_SynchronousVerification_* below and in package verify.
+const unreachableTEIURL = "http://127.0.0.1:1"
+
+func testCfg() config.Config {
+	return config.Config{FullCheckThreshold: 20, CheckDivisorStage1: 10, CheckDivisorStage2: 30}
+}
 
 func fixtureVector() []float64 {
 	v := make([]float64, 768)
@@ -43,7 +58,7 @@ func TestSubmit_ActiveLeaseValidVector_Accepted(t *testing.T) {
 	const keyID = int64(1)
 	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
 
-	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}})
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}
@@ -71,7 +86,7 @@ func TestSubmit_NoLeaseHeld_RejectedNotLeased(t *testing.T) {
 		t.Fatalf("seed job: %v", err)
 	}
 
-	results := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}})
+	results := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -90,7 +105,7 @@ func TestSubmit_LeaseHeldByDifferentKey_RejectedNotLeased(t *testing.T) {
 	ctx := context.Background()
 	jobID := seedLeasedJob(t, pool, 999, time.Now().Add(5*time.Minute))
 
-	results := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}})
+	results := Submit(ctx, pool, 1, []Item{{JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -102,7 +117,7 @@ func TestSubmit_ExpiredLease_RejectedNotLeased(t *testing.T) {
 	const keyID = int64(1)
 	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(-1*time.Minute))
 
-	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}})
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -114,7 +129,7 @@ func TestSubmit_WrongVectorLength_RejectedInvalidNoReputationImpact(t *testing.T
 	const keyID = int64(1)
 	jobID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
 
-	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: []float64{0.1, 0.2}}})
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: []float64{0.1, 0.2}}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusInvalidVector {
 		t.Errorf("Status = %v, want StatusInvalidVector", results[0].Status)
 	}
@@ -137,7 +152,7 @@ func TestSubmit_NonFiniteVectorValue_RejectedInvalid(t *testing.T) {
 	badVector := fixtureVector()
 	badVector[10] = math.NaN()
 
-	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: badVector}})
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: badVector}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusInvalidVector {
 		t.Errorf("Status = %v, want StatusInvalidVector", results[0].Status)
 	}
@@ -159,7 +174,7 @@ func TestSubmit_MixedBatch_EachItemHandledIndependently(t *testing.T) {
 	results := Submit(ctx, pool, keyID, []Item{
 		{JobID: goodJobID, Vector: fixtureVector()},
 		{JobID: unleashedJobID, Vector: fixtureVector()},
-	})
+	}, unreachableTEIURL, testCfg())
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2", len(results))
 	}
@@ -168,6 +183,84 @@ func TestSubmit_MixedBatch_EachItemHandledIndependently(t *testing.T) {
 	}
 	if results[1].Status != StatusNotLeased {
 		t.Errorf("results[1].Status = %v, want StatusNotLeased", results[1].Status)
+	}
+}
+
+func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ('sync-verify-match', 'the real job text') RETURNING id`,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO volunteer_leases (job_id, leased_by_key_id, expires_at) VALUES ($1, $2, $3)`,
+		jobID, keyID, time.Now().Add(5*time.Minute),
+	); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+
+	submitted := fixtureVector()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([][]float64{submitted}) // trusted re-embedding matches exactly
+	}))
+	defer server.Close()
+
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: submitted}}, server.URL, testCfg())
+	if results[0].Status != StatusAccepted {
+		t.Fatalf("Status = %v, want StatusAccepted", results[0].Status)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM volunteer_submissions WHERE job_id = $1`, jobID).Scan(&status); err != nil {
+		t.Fatalf("querying volunteer_submissions: %v", err)
+	}
+	if status != "verified" {
+		t.Errorf("stored status = %q, want verified", status)
+	}
+}
+
+func TestSubmit_SynchronousVerification_MismatchedVector_EndsRejected(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ('sync-verify-mismatch', 'the real job text') RETURNING id`,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO volunteer_leases (job_id, leased_by_key_id, expires_at) VALUES ($1, $2, $3)`,
+		jobID, keyID, time.Now().Add(5*time.Minute),
+	); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+
+	submitted := fixtureVector()
+	trusted := make([]float64, 768)
+	trusted[0] = 1 // orthogonal-ish to submitted's uniform small values: low cosine similarity
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([][]float64{trusted})
+	}))
+	defer server.Close()
+
+	results := Submit(ctx, pool, keyID, []Item{{JobID: jobID, Vector: submitted}}, server.URL, testCfg())
+	if results[0].Status != StatusAccepted {
+		t.Fatalf("Status = %v, want StatusAccepted", results[0].Status)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM volunteer_submissions WHERE job_id = $1`, jobID).Scan(&status); err != nil {
+		t.Fatalf("querying volunteer_submissions: %v", err)
+	}
+	if status != "rejected" {
+		t.Errorf("stored status = %q, want rejected", status)
 	}
 }
 
@@ -182,7 +275,7 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	results := Submit(ctx, pool, keyID, []Item{
 		{JobID: jobID, Vector: fixtureVector()},
 		{JobID: jobID, Vector: fixtureVector()},
-	})
+	}, unreachableTEIURL, testCfg())
 
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2 (a per-item outcome even when the DB call fails, not a nil/abort)", len(results))

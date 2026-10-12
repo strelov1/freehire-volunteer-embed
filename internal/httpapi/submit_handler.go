@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/config"
 	"github.com/strelov1/freehire-volunteer-embed/internal/submit"
 )
 
@@ -43,7 +44,7 @@ func statusString(s submit.Status) string {
 
 // SubmitHandler serves POST /v1/embed-tasks/submit. It must run behind
 // RequireEmbedScope, which supplies the caller's key id via context.
-func SubmitHandler(pool *pgxpool.Pool) http.Handler {
+func SubmitHandler(pool *pgxpool.Pool, cfg config.Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		keyID, ok := KeyIDFromContext(r.Context())
 		if !ok {
@@ -62,7 +63,7 @@ func SubmitHandler(pool *pgxpool.Pool) http.Handler {
 			items[i] = submit.Item{JobID: s.JobID, Vector: s.Vector}
 		}
 
-		results := submit.Submit(r.Context(), pool, keyID, items)
+		results := submit.Submit(r.Context(), pool, keyID, items, cfg.TrustedTEIURL, cfg)
 
 		resp := submitResponseBody{Results: make([]submitResultItem, len(results))}
 		for i, r := range results {

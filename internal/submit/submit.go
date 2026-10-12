@@ -11,6 +11,10 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/config"
+	"github.com/strelov1/freehire-volunteer-embed/internal/hiredata"
+	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
+	"github.com/strelov1/freehire-volunteer-embed/internal/verify"
 )
 
 const vectorDimension = 768
@@ -40,16 +44,18 @@ type Result struct {
 // Submit processes each item independently: a rejection OR an infrastructure
 // error on one item never affects the others, and submission never touches
 // reputation (reputation only changes as a result of spot-check
-// verification, not at submission time).
-func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item) []Result {
+// verification, not at submission time — see internal/reputation group 7).
+// An accepted item is also spot-check verified synchronously, before this
+// call returns: there is no separate background worker (see design.md).
+func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
 	for i, item := range items {
-		results[i] = Result{JobID: item.JobID, Status: submitOne(ctx, pool, keyID, item)}
+		results[i] = Result{JobID: item.JobID, Status: submitOne(ctx, pool, keyID, item, teiURL, cfg)}
 	}
 	return results
 }
 
-func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) Status {
+func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, teiURL string, cfg config.Config) Status {
 	if !validVector(item.Vector) {
 		return StatusInvalidVector
 	}
@@ -68,14 +74,51 @@ func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) 
 		return StatusNotLeased
 	}
 
-	if _, err := pool.Exec(ctx, `
+	var submissionID int64
+	if err := pool.QueryRow(ctx, `
 		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, status)
 		VALUES ($1, $2, $3, 'pending')
-	`, item.JobID, keyID, formatVector(item.Vector)); err != nil {
+		RETURNING id
+	`, item.JobID, keyID, formatVector(item.Vector)).Scan(&submissionID); err != nil {
 		return StatusError
 	}
 
+	verifySubmission(ctx, pool, teiURL, cfg, keyID, submissionID, item)
+
 	return StatusAccepted
+}
+
+// verifySubmission runs the spot-check decision for a just-staged submission
+// and records the outcome on its volunteer_submissions row. It deliberately
+// swallows its own errors (job text lookup, TEI call) rather than failing
+// the submission request: a verification hiccup leaves the row pending for
+// a later pass, it does not change what the volunteer's HTTP call saw.
+func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cfg config.Config, keyID, submissionID int64, item Item) {
+	jobText, err := hiredata.JobText(ctx, pool, item.JobID)
+	if err != nil {
+		return
+	}
+	totalChecked, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
+	if err != nil {
+		return
+	}
+
+	outcome := verify.Evaluate(ctx, teiURL, cfg, totalChecked, consecutivePasses, jobText, item.Vector)
+
+	var newStatus string
+	switch outcome {
+	case verify.OutcomeVerifiedWithoutCheck, verify.OutcomeVerifiedPassedCheck:
+		newStatus = "verified"
+	case verify.OutcomeRejectedFailedCheck:
+		newStatus = "rejected"
+	default: // OutcomeDeferredTEIUnavailable: leave pending
+		return
+	}
+
+	_, _ = pool.Exec(ctx,
+		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
+		newStatus, submissionID,
+	)
 }
 
 func validVector(v []float64) bool {

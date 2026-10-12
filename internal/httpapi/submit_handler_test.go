@@ -53,7 +53,7 @@ func TestSubmitHandler_LeasedJobValidVector_Accepted(t *testing.T) {
 	req := withKeyID(httptest.NewRequest(http.MethodPost, "/v1/embed-tasks/submit", bytes.NewReader(payload)), keyID)
 	rec := httptest.NewRecorder()
 
-	SubmitHandler(pool).ServeHTTP(rec, req)
+	SubmitHandler(pool, testConfig()).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
@@ -86,7 +86,7 @@ func TestSubmitHandler_UnleasedJob_ReturnsNotLeasedStatus(t *testing.T) {
 	req := withKeyID(httptest.NewRequest(http.MethodPost, "/v1/embed-tasks/submit", bytes.NewReader(payload)), 5)
 	rec := httptest.NewRecorder()
 
-	SubmitHandler(pool).ServeHTTP(rec, req)
+	SubmitHandler(pool, testConfig()).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -106,7 +106,7 @@ func TestSubmitHandler_MalformedJSON_Returns400(t *testing.T) {
 	req := withKeyID(httptest.NewRequest(http.MethodPost, "/v1/embed-tasks/submit", bytes.NewReader([]byte("not json"))), 5)
 	rec := httptest.NewRecorder()
 
-	SubmitHandler(pool).ServeHTTP(rec, req)
+	SubmitHandler(pool, testConfig()).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
@@ -120,7 +120,7 @@ func TestSubmitHandler_MissingKeyIDInContext_Returns500(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/embed-tasks/submit", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 
-	SubmitHandler(pool).ServeHTTP(rec, req)
+	SubmitHandler(pool, testConfig()).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 (handler used without auth middleware)", rec.Code)

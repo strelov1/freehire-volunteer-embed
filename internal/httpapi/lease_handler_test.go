@@ -17,10 +17,19 @@ func withKeyID(r *http.Request, keyID int64) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), keyIDContextKey, keyID))
 }
 
+// unreachableTEIURL lets handler tests that don't care about spot-check
+// outcomes (lease tests never call it; submit tests let verification defer)
+// run without a real TEI server.
+const unreachableTEIURL = "http://127.0.0.1:1"
+
 func testConfig() config.Config {
 	return config.Config{
-		LeaseDuration:     5 * time.Minute,
-		MaxLeaseBatchSize: 50,
+		LeaseDuration:      5 * time.Minute,
+		MaxLeaseBatchSize:  50,
+		TrustedTEIURL:      unreachableTEIURL,
+		FullCheckThreshold: 20,
+		CheckDivisorStage1: 10,
+		CheckDivisorStage2: 30,
 	}
 }
 

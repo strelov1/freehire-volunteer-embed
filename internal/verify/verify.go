@@ -36,8 +36,11 @@ const (
 // Evaluate decides whether to spot-check a submission (via
 // reputation.ShouldCheck) and, if so, re-embeds jobText through the trusted
 // TEI and compares it to submittedVector by cosine similarity.
-func Evaluate(ctx context.Context, teiURL string, cfg config.Config, totalChecked, consecutivePasses int, jobText string, submittedVector []float64) Outcome {
-	if !reputation.ShouldCheck(totalChecked, consecutivePasses, cfg) {
+//
+// Contract for callers: totalEvaluated must reflect a counter incremented
+// once per call to Evaluate — see reputation.ShouldCheck's doc comment.
+func Evaluate(ctx context.Context, teiURL string, cfg config.Config, totalEvaluated, consecutivePasses int, jobText string, submittedVector []float64) Outcome {
+	if !reputation.ShouldCheck(totalEvaluated, consecutivePasses, cfg) {
 		return OutcomeVerifiedWithoutCheck
 	}
 

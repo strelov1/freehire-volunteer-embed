@@ -29,18 +29,18 @@ func IsBanned(ctx context.Context, pool *pgxpool.Pool, keyID int64) (bool, error
 	return bannedAt != nil, nil
 }
 
-// GetCounts returns a key's current total_checked and consecutive_passes,
-// both zero for a key with no reputation row yet (never been checked).
-func GetCounts(ctx context.Context, pool *pgxpool.Pool, keyID int64) (totalChecked, consecutivePasses int, err error) {
+// GetCounts returns a key's current total_evaluated and consecutive_passes,
+// both zero for a key with no reputation row yet (never submitted).
+func GetCounts(ctx context.Context, pool *pgxpool.Pool, keyID int64) (totalEvaluated, consecutivePasses int, err error) {
 	err = pool.QueryRow(ctx,
-		`SELECT total_checked, consecutive_passes FROM volunteer_reputation WHERE key_id = $1`,
+		`SELECT total_evaluated, consecutive_passes FROM volunteer_reputation WHERE key_id = $1`,
 		keyID,
-	).Scan(&totalChecked, &consecutivePasses)
+	).Scan(&totalEvaluated, &consecutivePasses)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, 0, nil
 	}
 	if err != nil {
 		return 0, 0, fmt.Errorf("reputation: get counts for key %d: %w", keyID, err)
 	}
-	return totalChecked, consecutivePasses, nil
+	return totalEvaluated, consecutivePasses, nil
 }

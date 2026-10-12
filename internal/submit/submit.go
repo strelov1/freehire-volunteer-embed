@@ -98,12 +98,12 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 	if err != nil {
 		return
 	}
-	totalChecked, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
+	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
 	if err != nil {
 		return
 	}
 
-	outcome := verify.Evaluate(ctx, teiURL, cfg, totalChecked, consecutivePasses, jobText, item.Vector)
+	outcome := verify.Evaluate(ctx, teiURL, cfg, totalEvaluated, consecutivePasses, jobText, item.Vector)
 
 	var newStatus string
 	switch outcome {

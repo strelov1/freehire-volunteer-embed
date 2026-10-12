@@ -9,11 +9,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
+
+// requestTimeout bounds every call to Embed, independent of whatever
+// deadline (if any) the caller's context carries. Spot-check verification
+// runs synchronously inside a volunteer's submit request (see
+// internal/submit), so a slow — not down, just slow — trusted TEI must not
+// be allowed to hang that request indefinitely; it should instead fail fast
+// into OutcomeDeferredTEIUnavailable like an unreachable one does. A
+// variable, not a const, so tests can shrink it instead of sleeping for the
+// production default.
+var requestTimeout = 10 * time.Second
 
 // Embed posts a single text to a TEI-compatible /embed endpoint and returns
 // its embedding vector.
 func Embed(ctx context.Context, teiURL, text string) ([]float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
 	payload, err := json.Marshal(map[string][]string{"inputs": {text}})
 	if err != nil {
 		return nil, fmt.Errorf("tei: encode request: %w", err)

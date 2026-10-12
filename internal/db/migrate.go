@@ -18,13 +18,25 @@ var migrationFiles embed.FS
 // migration bookkeeping. Safe to call repeatedly; already-applied files are
 // skipped.
 func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS volunteer_embed_schema_migrations (
-			filename text PRIMARY KEY,
-			applied_at timestamptz NOT NULL DEFAULT now()
-		)
-	`); err != nil {
-		return fmt.Errorf("db: ensure migrations table: %w", err)
+	// Postgres checks CREATE privilege on the schema before checking IF NOT
+	// EXISTS, so a role granted only SELECT/INSERT on this table (production's
+	// least-privilege role, once the table has been created by hand) would
+	// fail here on every restart even though there is nothing to create.
+	var migrationsTableExists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT to_regclass('public.volunteer_embed_schema_migrations') IS NOT NULL`,
+	).Scan(&migrationsTableExists); err != nil {
+		return fmt.Errorf("db: check migrations table: %w", err)
+	}
+	if !migrationsTableExists {
+		if _, err := pool.Exec(ctx, `
+			CREATE TABLE volunteer_embed_schema_migrations (
+				filename text PRIMARY KEY,
+				applied_at timestamptz NOT NULL DEFAULT now()
+			)
+		`); err != nil {
+			return fmt.Errorf("db: ensure migrations table: %w", err)
+		}
 	}
 
 	entries, err := migrationFiles.ReadDir("migrations")

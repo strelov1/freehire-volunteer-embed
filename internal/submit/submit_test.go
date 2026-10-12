@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
+	"github.com/strelov1/freehire-volunteer-embed/internal/pgvec"
 	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
 	"github.com/strelov1/freehire-volunteer-embed/internal/testdb"
 )
@@ -377,5 +378,71 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 		if r.Status != StatusError {
 			t.Errorf("results[%d].Status = %v, want StatusError", i, r.Status)
 		}
+	}
+}
+
+// TestVerifySubmission_PromoteFailsIndependentlyOfContext_LeavesRowPending
+// guards against a specific regression caught in review: a Promote failure
+// that has nothing to do with the request's own context being cancelled
+// (e.g. a transient DB error) must not still finalize the submission as
+// "verified" — that would claim a vector reached job_semantic_chunks when
+// it never did, with no worker anywhere to ever revisit it.
+//
+// It calls verifySubmission directly (this test is in package submit) with
+// a vector whose dimension doesn't match job_semantic_chunks.embedding's
+// vector(768) column, forcing Promote's INSERT to fail for a reason wholly
+// unrelated to ctx. The trusted server returns a vector of the same
+// (wrong) length so the cosine comparison still matches and reaches
+// OutcomeVerifiedPassedCheck — Submit's own public validVector gate would
+// normally reject a 768-length mismatch before this point, so this test
+// deliberately bypasses it to exercise verifySubmission in isolation.
+func TestVerifySubmission_PromoteFailsIndependentlyOfContext_LeavesRowPending(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ('promote-fails-job', 'the real job text') RETURNING id`,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	// volunteer_submissions.embedding is ALSO vector(768), so this row's own
+	// placeholder must be a valid 768-length vector — the dimension
+	// mismatch this test exercises is specific to job_semantic_chunks,
+	// triggered below via a short vector passed directly to
+	// verifySubmission, independent of what's stored on this seed row.
+	wrongDimensionVector := []float64{0.1, 0.2, 0.3}
+	var submissionID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, status)
+		VALUES ($1, $2, $3, 'pending')
+		RETURNING id
+	`, jobID, keyID, pgvec.Format(fixtureVector())).Scan(&submissionID); err != nil {
+		t.Fatalf("seed submission: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([][]float64{wrongDimensionVector}) // matches exactly -> OutcomeVerifiedPassedCheck
+	}))
+	defer server.Close()
+
+	item := Item{JobID: jobID, Vector: wrongDimensionVector}
+	verifySubmission(ctx, pool, server.URL, testCfg(), keyID, submissionID, item)
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM volunteer_submissions WHERE id = $1`, submissionID).Scan(&status); err != nil {
+		t.Fatalf("querying volunteer_submissions: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("stored status = %q, want pending (Promote failed, so this must not be finalized as verified)", status)
+	}
+
+	var chunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM job_semantic_chunks WHERE job_id = $1`, jobID).Scan(&chunkCount); err != nil {
+		t.Fatalf("querying job_semantic_chunks: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Errorf("job_semantic_chunks rows = %d, want 0 (the dimension-mismatched insert must have failed)", chunkCount)
 	}
 }

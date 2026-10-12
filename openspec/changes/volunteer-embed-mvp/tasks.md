@@ -45,9 +45,9 @@
 
 ## 8. Verified promotion
 
-- [ ] 8.1 Promotion transaction: write the verified vector into `job_semantic_chunks` and clear/complete the corresponding `semantic_outbox` row atomically
-- [ ] 8.2 Idempotency guard: a job already promoted (e.g. via a stale re-submission) is not promoted twice
-- [ ] 8.3 Integration check against a disposable copy of the real schema (not the production database) proving a promoted row is indistinguishable from `cmd/embed`'s own output
+- [x] 8.1 Promotion transaction: write the verified vector into `job_semantic_chunks` and clear/complete the corresponding `semantic_outbox` row atomically
+- [x] 8.2 Idempotency guard: a job already promoted (e.g. via a stale re-submission) is not promoted twice
+- [x] 8.3 Integration check against a disposable copy of the real schema (not the production database) proving a promoted row is indistinguishable from `cmd/embed`'s own output
 
 ## 9. Operational basics
 

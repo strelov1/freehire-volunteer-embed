@@ -110,21 +110,23 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 	var newStatus string
 	switch outcome {
 	case verify.OutcomeVerifiedWithoutCheck:
-		newStatus = "verified"
 		if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
 			log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
 		}
 		if err := promote.Promote(ctx, pool, item.JobID, item.Vector); err != nil {
 			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
+			return // do not mark verified: nothing actually reached job_semantic_chunks
 		}
-	case verify.OutcomeVerifiedPassedCheck:
 		newStatus = "verified"
+	case verify.OutcomeVerifiedPassedCheck:
 		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
 			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, submissionID, err)
 		}
 		if err := promote.Promote(ctx, pool, item.JobID, item.Vector); err != nil {
 			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
+			return // do not mark verified: nothing actually reached job_semantic_chunks
 		}
+		newStatus = "verified"
 	case verify.OutcomeRejectedFailedCheck:
 		newStatus = "rejected"
 		if err := reputation.RecordFailed(ctx, pool, keyID); err != nil {

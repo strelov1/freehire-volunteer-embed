@@ -8,6 +8,8 @@ This service lets anyone on the internet donate embedding compute against that s
 
 **Key existing constraint carried over from freehire:** writes into `job_semantic_chunks` are destructive — a bad vector silently overwrites a job's embedding and the outbox will not re-queue it on its own. Nothing unverified may reach that table.
 
+**Discovered via a live end-to-end run against a real embedding server (not just mocked tests): freehire's real `cmd/embed` does not feed raw `jobs.description` to TEI.** It HTML-strips the description and prepends `"passage: {title} at {company}. "` before embedding (`internal/search/search/{plaintext,embed}.go` in the `hire` repo — e5 is asymmetric: the corpus side needs the `"passage:"` prefix). A first version of this service skipped that step and fed raw, possibly-HTML-bearing `description` text straight through. It was internally self-consistent (the volunteer's and the trusted side's re-embedding agreed with each other), which is exactly why unit tests against a mocked TEI didn't catch it — but it diverged from what real production actually embeds, which a live run against a real TEI-compatible server surfaced immediately (the same text, with vs. without the prefix, produced cosine similarity well below the 0.99 threshold). Fixed by porting the exact same formatting into `internal/jobtext`, used by both `lease` (what a volunteer is handed to embed) and the spot-check re-embedding — so a volunteer never needs to know about this convention; the text they're handed already has it baked in.
+
 ## Goals / Non-Goals
 
 **Goals:**

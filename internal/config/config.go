@@ -14,6 +14,7 @@ import (
 type Config struct {
 	DatabaseURL        string
 	TrustedTEIURL      string
+	TrustedTEIAPIKey   string
 	ListenAddr         string
 	LeaseDuration      time.Duration
 	FullCheckThreshold int
@@ -69,6 +70,7 @@ func Load() (Config, error) {
 	return Config{
 		DatabaseURL:        databaseURL,
 		TrustedTEIURL:      trustedTEIURL,
+		TrustedTEIAPIKey:   os.Getenv("TRUSTED_TEI_API_KEY"), // optional: empty is valid, freehire's own TEI needs none
 		ListenAddr:         listenAddr,
 		LeaseDuration:      leaseDuration,
 		FullCheckThreshold: fullCheckThreshold,

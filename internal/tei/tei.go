@@ -23,8 +23,11 @@ import (
 var requestTimeout = 10 * time.Second
 
 // Embed posts a single text to a TEI-compatible /embed endpoint and returns
-// its embedding vector.
-func Embed(ctx context.Context, teiURL, text string) ([]float64, error) {
+// its embedding vector. apiKey is sent as a Bearer token when non-empty —
+// freehire's own trusted TEI needs none (a loopback service with no auth),
+// but some TEI-compatible deployments (e.g. HF Inference Endpoints, or a
+// volunteer's own authenticated server) require one.
+func Embed(ctx context.Context, teiURL, apiKey, text string) ([]float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
@@ -38,6 +41,9 @@ func Embed(ctx context.Context, teiURL, text string) ([]float64, error) {
 		return nil, fmt.Errorf("tei: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

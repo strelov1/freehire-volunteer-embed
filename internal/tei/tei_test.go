@@ -25,7 +25,7 @@ func TestEmbed_SuccessfulResponse_ReturnsVector(t *testing.T) {
 	}))
 	defer server.Close()
 
-	vec, err := Embed(context.Background(), server.URL, "hello job")
+	vec, err := Embed(context.Background(), server.URL, "", "hello job")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestEmbed_NonOKStatus_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := Embed(context.Background(), server.URL, "text")
+	_, err := Embed(context.Background(), server.URL, "", "text")
 	if err == nil {
 		t.Fatal("expected an error for a non-200 response")
 	}
@@ -59,7 +59,7 @@ func TestEmbed_MalformedJSON_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := Embed(context.Background(), server.URL, "text")
+	_, err := Embed(context.Background(), server.URL, "", "text")
 	if err == nil {
 		t.Fatal("expected an error for a malformed JSON response")
 	}
@@ -71,14 +71,46 @@ func TestEmbed_EmptyVectorArray_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := Embed(context.Background(), server.URL, "text")
+	_, err := Embed(context.Background(), server.URL, "", "text")
 	if err == nil {
 		t.Fatal("expected an error for an empty vector array")
 	}
 }
 
+func TestEmbed_WithAPIKey_SendsBearerHeader(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode([][]float64{{0.1}})
+	}))
+	defer server.Close()
+
+	if _, err := Embed(context.Background(), server.URL, "secret-token", "text"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if gotAuth != "Bearer secret-token" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer secret-token")
+	}
+}
+
+func TestEmbed_WithoutAPIKey_SendsNoAuthorizationHeader(t *testing.T) {
+	sawHeader := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHeader = r.Header.Get("Authorization") != ""
+		_ = json.NewEncoder(w).Encode([][]float64{{0.1}})
+	}))
+	defer server.Close()
+
+	if _, err := Embed(context.Background(), server.URL, "", "text"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if sawHeader {
+		t.Error("expected no Authorization header when apiKey is empty (freehire's real TEI needs no auth)")
+	}
+}
+
 func TestEmbed_UnreachableServer_ReturnsError(t *testing.T) {
-	_, err := Embed(context.Background(), "http://127.0.0.1:1", "text")
+	_, err := Embed(context.Background(), "http://127.0.0.1:1", "", "text")
 	if err == nil {
 		t.Fatal("expected an error for an unreachable server")
 	}
@@ -101,7 +133,7 @@ func TestEmbed_SlowServer_FailsFastRatherThanHanging(t *testing.T) {
 	}))
 
 	start := time.Now()
-	_, err := Embed(context.Background(), server.URL, "text")
+	_, err := Embed(context.Background(), server.URL, "", "text")
 	elapsed := time.Since(start)
 
 	close(unblock) // let the still-blocked handler goroutine finish...

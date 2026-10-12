@@ -83,13 +83,14 @@ func TestLookupAPIKeyByHash_ExpiresAtPopulated(t *testing.T) {
 	}
 }
 
-func TestJobText_ReturnsDescription(t *testing.T) {
+func TestJobText_ReturnsTitleCompanyPrefixedStrippedDescription(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
 	var jobID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO jobs (public_slug, description) VALUES ('acme-backend-eng', 'Build great APIs') RETURNING id
+		INSERT INTO jobs (public_slug, title, company, description)
+		VALUES ('acme-backend-eng', 'Backend Engineer', 'Acme', '<p>Build great APIs.</p>') RETURNING id
 	`).Scan(&jobID); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
@@ -98,8 +99,9 @@ func TestJobText_ReturnsDescription(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JobText: %v", err)
 	}
-	if text != "Build great APIs" {
-		t.Errorf("JobText = %q, want %q", text, "Build great APIs")
+	want := "passage: Backend Engineer at Acme. Build great APIs."
+	if text != want {
+		t.Errorf("JobText = %q, want %q", text, want)
 	}
 }
 

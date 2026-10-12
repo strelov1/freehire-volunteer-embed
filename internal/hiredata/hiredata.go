@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/jobtext"
 )
 
 type APIKey struct {
@@ -37,15 +38,19 @@ func LookupAPIKeyByHash(ctx context.Context, pool *pgxpool.Pool, tokenHash strin
 	return key, true, nil
 }
 
-// JobText returns the job description backing a semantic_outbox entry.
+// JobText returns the exact text to embed for a job — the same
+// "passage: {title} at {company}. {description}" (HTML-stripped) text
+// hire's own cmd/embed would feed to TEI (see internal/jobtext), so this
+// is what's handed to volunteers to embed and what this service re-embeds
+// itself during spot-check verification.
 func JobText(ctx context.Context, pool *pgxpool.Pool, jobID int64) (string, error) {
-	var description string
+	var title, company, description string
 	err := pool.QueryRow(ctx,
-		`SELECT description FROM jobs WHERE id = $1`,
+		`SELECT title, company, description FROM jobs WHERE id = $1`,
 		jobID,
-	).Scan(&description)
+	).Scan(&title, &company, &description)
 	if err != nil {
 		return "", fmt.Errorf("hiredata: job text for job %d: %w", jobID, err)
 	}
-	return description, nil
+	return jobtext.FormatForEmbedding(title, company, description), nil
 }

@@ -25,7 +25,13 @@ func TestClaim_PendingJob_IsClaimedWithText(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
-	jobID := seedJob(t, pool, "acme-eng", "Build great APIs")
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, title, company, description) VALUES ($1, $2, $3, $4) RETURNING id`,
+		"acme-eng", "Backend Engineer", "Acme", "Build great APIs",
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5')
 	`, jobID); err != nil {
@@ -42,8 +48,9 @@ func TestClaim_PendingJob_IsClaimedWithText(t *testing.T) {
 	if claimed[0].JobID != jobID {
 		t.Errorf("JobID = %d, want %d", claimed[0].JobID, jobID)
 	}
-	if claimed[0].Text != "Build great APIs" {
-		t.Errorf("Text = %q, want %q", claimed[0].Text, "Build great APIs")
+	want := "passage: Backend Engineer at Acme. Build great APIs"
+	if claimed[0].Text != want {
+		t.Errorf("Text = %q, want %q", claimed[0].Text, want)
 	}
 }
 

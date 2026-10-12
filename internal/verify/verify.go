@@ -44,7 +44,7 @@ func Evaluate(ctx context.Context, teiURL string, cfg config.Config, totalEvalua
 		return OutcomeVerifiedWithoutCheck
 	}
 
-	trustedVector, err := tei.Embed(ctx, teiURL, jobText)
+	trustedVector, err := tei.Embed(ctx, teiURL, cfg.TrustedTEIAPIKey, jobText)
 	if err != nil {
 		return OutcomeDeferredTEIUnavailable
 	}

@@ -67,6 +67,23 @@ func TestLoad_RequiredVarsPresent_PopulatesFields(t *testing.T) {
 	if cfg.TrustedTEIURL != "http://127.0.0.1:8090/embed" {
 		t.Errorf("TrustedTEIURL = %q", cfg.TrustedTEIURL)
 	}
+	if cfg.TrustedTEIAPIKey != "" {
+		t.Errorf("TrustedTEIAPIKey = %q, want empty when unset (freehire's own TEI needs no auth)", cfg.TrustedTEIAPIKey)
+	}
+}
+
+func TestLoad_TrustedTEIAPIKeySet_IsPopulated(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TRUSTED_TEI_API_KEY", "some-secret")
+
+	cfg, err := Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TrustedTEIAPIKey != "some-secret" {
+		t.Errorf("TrustedTEIAPIKey = %q, want %q", cfg.TrustedTEIAPIKey, "some-secret")
+	}
 }
 
 func TestLoad_OptionalVarsDefaultWhenUnset(t *testing.T) {

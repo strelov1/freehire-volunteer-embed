@@ -129,8 +129,13 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 		newStatus = "verified"
 	case verify.OutcomeRejectedFailedCheck:
 		newStatus = "rejected"
-		if err := reputation.RecordFailed(ctx, pool, keyID); err != nil {
+		justBanned, err := reputation.RecordFailed(ctx, pool, keyID)
+		if err != nil {
 			log.Printf("submit: record failed for key %d, submission %d: %v", keyID, submissionID, err)
+		}
+		if justBanned {
+			log.Printf("AUDIT ban key=%d reason=3_consecutive_spot_check_failures last_submission=%d job=%d",
+				keyID, submissionID, item.JobID)
 		}
 		if err := lease.Release(ctx, pool, item.JobID, keyID); err != nil {
 			log.Printf("submit: release lease for job %d, key %d: %v", item.JobID, keyID, err)
@@ -138,6 +143,9 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 	default: // OutcomeDeferredTEIUnavailable: leave pending, no reputation change
 		return
 	}
+
+	log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s",
+		keyID, item.JobID, submissionID, newStatus)
 
 	if _, err := pool.Exec(ctx,
 		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,

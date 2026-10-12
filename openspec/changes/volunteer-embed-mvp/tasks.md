@@ -51,9 +51,9 @@
 
 ## 9. Operational basics
 
-- [ ] 9.1 Request size limits and per-key rate limiting on both endpoints
-- [ ] 9.2 Structured logging for lease/submit/verify/ban events (enough to audit a disputed ban)
-- [ ] 9.3 Health check endpoint for the hosting platform
+- [x] 9.1 Request size limits and per-key rate limiting on both endpoints
+- [x] 9.2 Structured logging for lease/submit/verify/ban events (enough to audit a disputed ban)
+- [x] 9.3 Health check endpoint for the hosting platform
 
 ## 10. External dependency (tracked here, implemented in the `hire` repo)
 

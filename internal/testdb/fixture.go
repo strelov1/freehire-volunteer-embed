@@ -39,6 +39,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS api_keys_token_hash_idx ON api_keys (token_has
 CREATE TABLE IF NOT EXISTS jobs (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     public_slug text NOT NULL UNIQUE,
+    title text NOT NULL DEFAULT '',
+    company text NOT NULL DEFAULT '',
     description text NOT NULL DEFAULT ''
 );
 

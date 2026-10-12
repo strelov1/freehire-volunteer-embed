@@ -63,8 +63,12 @@ func TestRecordFailed_IncrementsTotalAndFails_ResetsPasses_NotYetBanned(t *testi
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := RecordFailed(ctx, pool, 1); err != nil {
+	banned, err := RecordFailed(ctx, pool, 1)
+	if err != nil {
 		t.Fatalf("RecordFailed: %v", err)
+	}
+	if banned {
+		t.Error("RecordFailed reported banned=true, want false (only the 2nd consecutive failure)")
 	}
 
 	var totalEvaluated, consecutivePasses, consecutiveFails int
@@ -92,8 +96,12 @@ func TestRecordFailed_ThirdConsecutiveFailure_SetsBannedAt(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := RecordFailed(ctx, pool, 1); err != nil {
+	justBanned, err := RecordFailed(ctx, pool, 1)
+	if err != nil {
 		t.Fatalf("RecordFailed: %v", err)
+	}
+	if !justBanned {
+		t.Error("RecordFailed reported banned=false on the 3rd consecutive failure, want true")
 	}
 
 	banned, err := IsBanned(ctx, pool, 1)

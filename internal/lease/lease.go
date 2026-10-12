@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/strelov1/freehire-volunteer-embed/internal/jobtext"
 )
 
 type ClaimedJob struct {
@@ -48,7 +49,11 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, 
 		SET claimed_at = now()
 		FROM claimable c
 		WHERE so.id = c.id
-		RETURNING so.job_id, (SELECT description FROM jobs WHERE jobs.id = so.job_id)
+		RETURNING
+			so.job_id,
+			(SELECT title FROM jobs WHERE jobs.id = so.job_id),
+			(SELECT company FROM jobs WHERE jobs.id = so.job_id),
+			(SELECT description FROM jobs WHERE jobs.id = so.job_id)
 	`, leaseDuration.Seconds(), batchSize)
 	if err != nil {
 		return nil, fmt.Errorf("lease: claim batch: %w", err)
@@ -56,12 +61,16 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, 
 
 	var claimed []ClaimedJob
 	for rows.Next() {
-		var job ClaimedJob
-		if err := rows.Scan(&job.JobID, &job.Text); err != nil {
+		var jobID int64
+		var title, company, description string
+		if err := rows.Scan(&jobID, &title, &company, &description); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("lease: scan claimed row: %w", err)
 		}
-		claimed = append(claimed, job)
+		claimed = append(claimed, ClaimedJob{
+			JobID: jobID,
+			Text:  jobtext.FormatForEmbedding(title, company, description),
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("lease: iterate claimed rows: %w", err)

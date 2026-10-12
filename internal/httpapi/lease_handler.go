@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -51,6 +52,7 @@ func LeaseHandler(pool *pgxpool.Pool, cfg config.Config) http.Handler {
 		for i, c := range claimed {
 			jobs[i] = leaseJob{ID: c.JobID, Text: c.Text}
 		}
+		log.Printf("AUDIT lease key=%d count=%d", keyID, len(jobs))
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(leaseResponseBody{Jobs: jobs})

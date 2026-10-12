@@ -46,7 +46,8 @@ func TestLeaseHandler_ReturnsClaimedJobs(t *testing.T) {
 
 	var jobID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO jobs (public_slug, description) VALUES ('lease-handler-job', 'desc text') RETURNING id
+		INSERT INTO jobs (public_slug, title, company, description)
+		VALUES ('lease-handler-job', 'Engineer', 'Acme', 'desc text') RETURNING id
 	`).Scan(&jobID); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
@@ -69,8 +70,9 @@ func TestLeaseHandler_ReturnsClaimedJobs(t *testing.T) {
 	if len(resp.Jobs) != 1 {
 		t.Fatalf("len(Jobs) = %d, want 1", len(resp.Jobs))
 	}
-	if resp.Jobs[0].ID != jobID || resp.Jobs[0].Text != "desc text" {
-		t.Errorf("Jobs[0] = %+v, want ID=%d Text=%q", resp.Jobs[0], jobID, "desc text")
+	wantText := "passage: Engineer at Acme. desc text"
+	if resp.Jobs[0].ID != jobID || resp.Jobs[0].Text != wantText {
+		t.Errorf("Jobs[0] = %+v, want ID=%d Text=%q", resp.Jobs[0], jobID, wantText)
 	}
 }
 

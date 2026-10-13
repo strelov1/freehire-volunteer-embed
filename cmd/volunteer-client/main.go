@@ -31,8 +31,8 @@ func main() {
 	lease := func(ctx context.Context) ([]client.Job, error) {
 		return client.Lease(ctx, httpClient, cfg.ServerURL, cfg.APIKey, cfg.BatchSize)
 	}
-	embed := func(ctx context.Context, text string) ([]float64, error) {
-		return tei.Embed(ctx, cfg.LocalTEIURL, cfg.LocalTEIAPIKey, text)
+	embedBatch := func(ctx context.Context, texts []string) ([][]float64, error) {
+		return tei.EmbedBatch(ctx, cfg.LocalTEIURL, cfg.LocalTEIAPIKey, texts)
 	}
 	submit := func(ctx context.Context, submissions []client.Submission) ([]client.Result, error) {
 		return client.Submit(ctx, httpClient, cfg.ServerURL, cfg.APIKey, submissions)
@@ -41,7 +41,7 @@ func main() {
 	log.Printf("volunteer-client starting: server=%s local-tei=%s batch-size=%d", cfg.ServerURL, cfg.LocalTEIURL, cfg.BatchSize)
 
 	for {
-		result, err := runOnce(ctx, lease, embed, submit)
+		result, err := runOnce(ctx, lease, embedBatch, submit)
 		if err != nil {
 			log.Printf("run: %v", err)
 		} else if result.Leased == 0 {

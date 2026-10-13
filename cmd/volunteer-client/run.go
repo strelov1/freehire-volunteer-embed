@@ -8,7 +8,7 @@ import (
 )
 
 type leaseFunc func(ctx context.Context) ([]client.Job, error)
-type embedFunc func(ctx context.Context, text string) ([]float64, error)
+type embedBatchFunc func(ctx context.Context, texts []string) ([][]float64, error)
 type submitFunc func(ctx context.Context, submissions []client.Submission) ([]client.Result, error)
 
 type runResult struct {
@@ -16,10 +16,16 @@ type runResult struct {
 	Submitted int
 }
 
-// runOnce leases one batch, embeds each job locally, and submits whatever
-// embedded successfully. A failure to embed one job (e.g. the local TEI
-// server hiccups) does not block the others — each job stands alone.
-func runOnce(ctx context.Context, lease leaseFunc, embed embedFunc, submit submitFunc) (runResult, error) {
+// runOnce leases one batch and embeds every job's text in a single
+// embedBatch call, not one call per job — a TEI-compatible server batches
+// the forward pass across inputs, which is substantially faster per item
+// than calling it once per text (see internal/tei.EmbedBatch). The
+// trade-off: a whole-batch failure (e.g. the local embedder is down)
+// skips the whole lease this round rather than isolating it to one bad
+// job, unlike the old per-item design — accepted because a single HTTP
+// call to one's own local embedder either works or doesn't; it has no
+// per-item failure mode worth preserving isolation for.
+func runOnce(ctx context.Context, lease leaseFunc, embedBatch embedBatchFunc, submit submitFunc) (runResult, error) {
 	jobs, err := lease(ctx)
 	if err != nil {
 		return runResult{}, err
@@ -27,20 +33,21 @@ func runOnce(ctx context.Context, lease leaseFunc, embed embedFunc, submit submi
 	if len(jobs) == 0 {
 		return runResult{}, nil
 	}
+	result := runResult{Leased: len(jobs)}
 
-	submissions := make([]client.Submission, 0, len(jobs))
-	for _, job := range jobs {
-		vector, err := embed(ctx, job.Text)
-		if err != nil {
-			log.Printf("embed job %d: %v (skipping, will be re-leased later)", job.ID, err)
-			continue
-		}
-		submissions = append(submissions, client.Submission{OutboxID: job.OutboxID, JobID: job.ID, Vector: vector})
+	texts := make([]string, len(jobs))
+	for i, job := range jobs {
+		texts[i] = job.Text
+	}
+	vectors, err := embedBatch(ctx, texts)
+	if err != nil {
+		log.Printf("embed batch of %d: %v (skipping, will be re-leased later)", len(jobs), err)
+		return result, nil
 	}
 
-	result := runResult{Leased: len(jobs)}
-	if len(submissions) == 0 {
-		return result, nil
+	submissions := make([]client.Submission, len(jobs))
+	for i, job := range jobs {
+		submissions[i] = client.Submission{OutboxID: job.OutboxID, JobID: job.ID, Vector: vectors[i]}
 	}
 
 	results, err := submit(ctx, submissions)

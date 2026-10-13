@@ -20,6 +20,12 @@ import (
 // into OutcomeDeferredTEIUnavailable like an unreachable one does. A
 // variable, not a const, so tests can shrink it instead of sleeping for the
 // production default.
+//
+// EmbedBatch treats this as a PER-TEXT budget, not a fixed total: a single
+// shared timeout covering an entire batch would be fine for Embed's one-item
+// case but a permanent failure mode for a volunteer's own CPU-only client
+// running a large batch (every call would time out forever, silently
+// contributing nothing — found during review of the batching change).
 var requestTimeout = 10 * time.Second
 
 // Embed posts a single text to a TEI-compatible /embed endpoint and returns
@@ -28,10 +34,31 @@ var requestTimeout = 10 * time.Second
 // but some TEI-compatible deployments (e.g. HF Inference Endpoints, or a
 // volunteer's own authenticated server) require one.
 func Embed(ctx context.Context, teiURL, apiKey, text string) ([]float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	vectors, err := EmbedBatch(ctx, teiURL, apiKey, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) == 0 {
+		return nil, fmt.Errorf("tei: response contained no vectors")
+	}
+	return vectors[0], nil
+}
+
+// EmbedBatch posts several texts to a TEI-compatible /embed endpoint in one
+// request and returns their vectors in the same order. A TEI-compatible
+// server batches the forward pass across inputs, so this is substantially
+// faster per item than calling Embed once per text — the volunteer client
+// uses this for exactly that reason. An empty texts slice is a no-op: it
+// never even opens a connection, since there is nothing to ask for.
+func EmbedBatch(ctx context.Context, teiURL, apiKey string, texts []string) ([][]float64, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout*time.Duration(len(texts)))
 	defer cancel()
 
-	payload, err := json.Marshal(map[string][]string{"inputs": {text}})
+	payload, err := json.Marshal(map[string][]string{"inputs": texts})
 	if err != nil {
 		return nil, fmt.Errorf("tei: encode request: %w", err)
 	}
@@ -63,8 +90,8 @@ func Embed(ctx context.Context, teiURL, apiKey, text string) ([]float64, error) 
 	if err := json.Unmarshal(body, &vectors); err != nil {
 		return nil, fmt.Errorf("tei: decode response: %w", err)
 	}
-	if len(vectors) == 0 {
-		return nil, fmt.Errorf("tei: response contained no vectors")
+	if len(vectors) != len(texts) {
+		return nil, fmt.Errorf("tei: requested %d embeddings, got %d back", len(texts), len(vectors))
 	}
-	return vectors[0], nil
+	return vectors, nil
 }

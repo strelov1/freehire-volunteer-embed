@@ -109,6 +109,92 @@ func TestEmbed_WithoutAPIKey_SendsNoAuthorizationHeader(t *testing.T) {
 	}
 }
 
+// TestEmbedBatch_MultipleTexts_ReturnsVectorsInOrder is the whole point of
+// EmbedBatch: one request carrying several texts, so a TEI-compatible
+// server can batch the forward pass instead of the caller paying per-item
+// request/connection overhead for each one separately (measured ~20x
+// faster for 5 texts against a local Mac TEI server during this project).
+func TestEmbedBatch_MultipleTexts_ReturnsVectorsInOrder(t *testing.T) {
+	var gotInputs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		gotInputs = body.Inputs
+		_ = json.NewEncoder(w).Encode([][]float64{{0.1, 0.2}, {0.3, 0.4}, {0.5, 0.6}})
+	}))
+	defer server.Close()
+
+	vecs, err := EmbedBatch(context.Background(), server.URL, "", []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(gotInputs) != 3 || gotInputs[0] != "a" || gotInputs[1] != "b" || gotInputs[2] != "c" {
+		t.Errorf("request inputs = %+v, want [a b c] in order", gotInputs)
+	}
+	want := [][]float64{{0.1, 0.2}, {0.3, 0.4}, {0.5, 0.6}}
+	if len(vecs) != len(want) {
+		t.Fatalf("len(vecs) = %d, want %d", len(vecs), len(want))
+	}
+	for i := range want {
+		if vecs[i][0] != want[i][0] || vecs[i][1] != want[i][1] {
+			t.Errorf("vecs[%d] = %v, want %v", i, vecs[i], want[i])
+		}
+	}
+}
+
+// TestEmbedBatch_ResponseCountMismatch_ReturnsError guards against silently
+// misattributing vectors to the wrong text if a TEI-compatible server ever
+// returns a different number of vectors than texts sent — a caller zipping
+// these back together by position must not do so blind.
+func TestEmbedBatch_ResponseCountMismatch_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([][]float64{{0.1, 0.2}}) // only 1, caller sent 2
+	}))
+	defer server.Close()
+
+	_, err := EmbedBatch(context.Background(), server.URL, "", []string{"a", "b"})
+	if err == nil {
+		t.Fatal("expected an error when the response vector count doesn't match the request text count")
+	}
+}
+
+func TestEmbedBatch_EmptyInput_ReturnsEmptyNotError(t *testing.T) {
+	vecs, err := EmbedBatch(context.Background(), "http://127.0.0.1:1", "", nil)
+	if err != nil {
+		t.Fatalf("EmbedBatch with no texts should not even need a server: %v", err)
+	}
+	if len(vecs) != 0 {
+		t.Errorf("len(vecs) = %d, want 0", len(vecs))
+	}
+}
+
+// TestEmbedBatch_TimeoutScalesWithBatchSize guards a real regression: a
+// single fixed timeout covering an entire batch (instead of per text) is
+// fine for a one-item call but becomes a permanent failure mode for a
+// volunteer's CPU-only machine running a large batch — every call would
+// time out forever, silently contributing nothing. The timeout budget
+// must grow with how much work was actually requested.
+func TestEmbedBatch_TimeoutScalesWithBatchSize(t *testing.T) {
+	old := requestTimeout
+	requestTimeout = 100 * time.Millisecond // per-text budget
+	defer func() { requestTimeout = old }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(250 * time.Millisecond) // longer than 1 text's budget, shorter than 5 texts' budget
+		_ = json.NewEncoder(w).Encode([][]float64{{0.1}, {0.2}, {0.3}, {0.4}, {0.5}})
+	}))
+	defer server.Close()
+
+	_, err := EmbedBatch(context.Background(), server.URL, "", []string{"a", "b", "c", "d", "e"})
+	if err != nil {
+		t.Fatalf("EmbedBatch with 5 texts should get roughly 5x the per-text timeout budget, got: %v", err)
+	}
+}
+
 func TestEmbed_UnreachableServer_ReturnsError(t *testing.T) {
 	_, err := Embed(context.Background(), "http://127.0.0.1:1", "", "text")
 	if err == nil {

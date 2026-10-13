@@ -26,7 +26,7 @@ See `openspec/changes/volunteer-embed-mvp/design.md` for the full design
 
 ## Running the volunteer client
 
-See [`HOW_TO_RUN_A_SECOND_VOLUNTEER.md`](HOW_TO_RUN_A_SECOND_VOLUNTEER.md)
+See [`HOW_TO_RUN_THE_CLIENT.md`](HOW_TO_RUN_THE_CLIENT.md)
 for a full walkthrough: building the client, running a local embedding
 server, and confirming it's actually processing real jobs.
 

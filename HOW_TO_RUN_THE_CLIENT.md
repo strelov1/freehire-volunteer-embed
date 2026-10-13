@@ -1,21 +1,27 @@
-# Running the volunteer client on a second machine
+# Running the volunteer client
 
-## Step 1 — install Go (if you don't have it)
+## Step 1 — download the client
+
+No Go install, no building — grab a prebuilt binary from the
+[latest release](https://github.com/strelov1/freehire-volunteer-embed/releases/latest)
+for your OS:
+
+- macOS (Apple Silicon): `volunteer-client-darwin-arm64`
+- macOS (Intel): `volunteer-client-darwin-amd64`
+- Linux (x86_64): `volunteer-client-linux-amd64`
+- Linux (ARM64): `volunteer-client-linux-arm64`
+- Windows: `volunteer-client-windows-amd64.exe`
+
+Make it executable (macOS/Linux):
 
 ```bash
-brew install go   # on Mac
-# or see https://go.dev/doc/install for Linux/Windows
+chmod +x volunteer-client-*
 ```
 
-## Step 2 — clone and build the client
+(If you'd rather build from source instead:
+`git clone https://github.com/strelov1/freehire-volunteer-embed.git && cd freehire-volunteer-embed && go build -o volunteer-client ./cmd/volunteer-client`)
 
-```bash
-git clone https://github.com/strelov1/freehire-volunteer-embed.git
-cd freehire-volunteer-embed
-go build -o volunteer-client ./cmd/volunteer-client
-```
-
-## Step 3 — run a local embedding server
+## Step 2 — run a local embedding server
 
 Needs Python 3 + venv:
 
@@ -93,18 +99,17 @@ Wait for the `ready` line (first run downloads the model, takes a minute or two)
 
 Note: if the machine has no Apple MPS (not a Mac), it'll run on CPU instead — slower, but still works.
 
-## Step 4 — run the client
+## Step 3 — run the client
 
 For the API key — **reuse the same one already in use** (ask me, or find it where I already showed it once in our conversation) — the same key on two machines at once is fine by design for this test.
 
 ```bash
-cd freehire-volunteer-embed
 SERVER_URL="https://freehire.me" \
 API_KEY="<your fhk_ key>" \
 LOCAL_TEI_URL="http://127.0.0.1:8080/embed" \
 BATCH_SIZE=5 \
 POLL_INTERVAL=10s \
-./volunteer-client
+./volunteer-client-darwin-arm64   # use the binary name matching your OS
 ```
 
 ## How to confirm it's actually working

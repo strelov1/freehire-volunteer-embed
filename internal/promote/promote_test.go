@@ -43,14 +43,15 @@ func TestPromote_WritesChunkAndClearsOutboxRow(t *testing.T) {
 	).Scan(&jobID); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5')`, jobID,
-	); err != nil {
+	var outboxID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`, jobID,
+	).Scan(&outboxID); err != nil {
 		t.Fatalf("seed outbox row: %v", err)
 	}
 
 	vec := fixtureVector()
-	if err := Promote(ctx, pool, jobID, vec); err != nil {
+	if err := Promote(ctx, pool, outboxID, jobID, vec); err != nil {
 		t.Fatalf("Promote: %v", err)
 	}
 
@@ -88,20 +89,21 @@ func TestPromote_CalledTwiceForSameJob_IsIdempotent(t *testing.T) {
 	).Scan(&jobID); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5')`, jobID,
-	); err != nil {
+	var outboxID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`, jobID,
+	).Scan(&outboxID); err != nil {
 		t.Fatalf("seed outbox row: %v", err)
 	}
 
 	first := fixtureVector()
-	if err := Promote(ctx, pool, jobID, first); err != nil {
+	if err := Promote(ctx, pool, outboxID, jobID, first); err != nil {
 		t.Fatalf("first Promote: %v", err)
 	}
 
 	second := fixtureVector()
 	second[0] = 0.99 // a different volunteer's (or stale re-submission's) vector
-	if err := Promote(ctx, pool, jobID, second); err != nil {
+	if err := Promote(ctx, pool, outboxID, jobID, second); err != nil {
 		t.Fatalf("second Promote: %v", err)
 	}
 
@@ -122,5 +124,45 @@ func TestPromote_CalledTwiceForSameJob_IsIdempotent(t *testing.T) {
 	stored := parseVectorText(t, storedText)
 	if stored[0] != first[0] {
 		t.Errorf("second Promote must not overwrite the first promotion's vector; got first element %v, want %v (the original)", stored[0], first[0])
+	}
+}
+
+// TestPromote_ClearsOnlyItsOwnOutboxRow guards a real production incident
+// (2026-10-13): a job mid-migration between two embedding model versions
+// has two semantic_outbox rows (one per target_model). Promoting one must
+// not clear the other, still-unverified one — Promote's DELETE is scoped
+// to the specific outbox row id it was given, not every row for the job.
+func TestPromote_ClearsOnlyItsOwnOutboxRow(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ('promote-sibling-job', 'd') RETURNING id`,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	var outboxID1, outboxID2 int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5-old') RETURNING id`, jobID,
+	).Scan(&outboxID1); err != nil {
+		t.Fatalf("seed outbox row 1: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5-chunked-v1') RETURNING id`, jobID,
+	).Scan(&outboxID2); err != nil {
+		t.Fatalf("seed outbox row 2: %v", err)
+	}
+
+	if err := Promote(ctx, pool, outboxID1, jobID, fixtureVector()); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	var sibling2Count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM semantic_outbox WHERE id = $1`, outboxID2).Scan(&sibling2Count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if sibling2Count != 1 {
+		t.Errorf("promoting outbox row %d deleted sibling row %d too (count=%d, want 1)", outboxID1, outboxID2, sibling2Count)
 	}
 }

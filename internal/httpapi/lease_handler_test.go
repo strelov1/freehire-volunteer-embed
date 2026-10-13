@@ -35,8 +35,9 @@ func testConfig() config.Config {
 
 type leaseResponse struct {
 	Jobs []struct {
-		ID   int64  `json:"id"`
-		Text string `json:"text"`
+		OutboxID int64  `json:"outbox_id"`
+		ID       int64  `json:"id"`
+		Text     string `json:"text"`
 	} `json:"jobs"`
 }
 
@@ -73,6 +74,9 @@ func TestLeaseHandler_ReturnsClaimedJobs(t *testing.T) {
 	wantText := "passage: Engineer at Acme. desc text"
 	if resp.Jobs[0].ID != jobID || resp.Jobs[0].Text != wantText {
 		t.Errorf("Jobs[0] = %+v, want ID=%d Text=%q", resp.Jobs[0], jobID, wantText)
+	}
+	if resp.Jobs[0].OutboxID == 0 {
+		t.Errorf("Jobs[0].OutboxID = 0, want a non-zero outbox row id (a volunteer must round-trip this in submit)")
 	}
 }
 

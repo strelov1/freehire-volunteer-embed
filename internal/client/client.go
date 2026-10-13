@@ -21,13 +21,18 @@ import (
 var requestTimeout = 30 * time.Second
 
 type Job struct {
-	ID   int64  `json:"id"`
-	Text string `json:"text"`
+	// OutboxID must be round-tripped unchanged in the matching Submission —
+	// a job can have more than one outstanding row at once, and ID (the
+	// job itself) alone cannot say which one a submission resolves.
+	OutboxID int64  `json:"outbox_id"`
+	ID       int64  `json:"id"`
+	Text     string `json:"text"`
 }
 
 type Submission struct {
-	JobID  int64     `json:"job_id"`
-	Vector []float64 `json:"vector"`
+	OutboxID int64     `json:"outbox_id"`
+	JobID    int64     `json:"job_id"`
+	Vector   []float64 `json:"vector"`
 }
 
 type Result struct {

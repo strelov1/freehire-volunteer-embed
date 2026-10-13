@@ -38,16 +38,22 @@ func TestSubmitHandler_LeasedJobValidVector_Accepted(t *testing.T) {
 	).Scan(&jobID); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
+	var outboxID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`, jobID,
+	).Scan(&outboxID); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO volunteer_leases (job_id, leased_by_key_id, expires_at) VALUES ($1, $2, $3)`,
-		jobID, keyID, time.Now().Add(5*time.Minute),
+		`INSERT INTO volunteer_leases (outbox_id, job_id, leased_by_key_id, expires_at) VALUES ($1, $2, $3, $4)`,
+		outboxID, jobID, keyID, time.Now().Add(5*time.Minute),
 	); err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}
 
 	payload, _ := json.Marshal(map[string]any{
 		"submissions": []map[string]any{
-			{"job_id": jobID, "vector": fixtureVector768()},
+			{"outbox_id": outboxID, "job_id": jobID, "vector": fixtureVector768()},
 		},
 	})
 	req := withKeyID(httptest.NewRequest(http.MethodPost, "/v1/embed-tasks/submit", bytes.NewReader(payload)), keyID)

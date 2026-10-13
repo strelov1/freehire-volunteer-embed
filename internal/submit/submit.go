@@ -34,8 +34,9 @@ const (
 )
 
 type Item struct {
-	JobID  int64
-	Vector []float64
+	OutboxID int64
+	JobID    int64
+	Vector   []float64
 }
 
 type Result struct {
@@ -66,9 +67,9 @@ func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, 
 	err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM volunteer_leases
-			WHERE job_id = $1 AND leased_by_key_id = $2 AND expires_at > now()
+			WHERE outbox_id = $1 AND leased_by_key_id = $2 AND expires_at > now()
 		)
-	`, item.JobID, keyID).Scan(&leased)
+	`, item.OutboxID, keyID).Scan(&leased)
 	if err != nil {
 		return StatusError
 	}
@@ -113,7 +114,7 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 		if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
 			log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
 		}
-		if err := promote.Promote(ctx, pool, item.JobID, item.Vector); err != nil {
+		if err := promote.Promote(ctx, pool, item.OutboxID, item.JobID, item.Vector); err != nil {
 			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
 			return // do not mark verified: nothing actually reached job_semantic_chunks
 		}
@@ -122,7 +123,7 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
 			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, submissionID, err)
 		}
-		if err := promote.Promote(ctx, pool, item.JobID, item.Vector); err != nil {
+		if err := promote.Promote(ctx, pool, item.OutboxID, item.JobID, item.Vector); err != nil {
 			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
 			return // do not mark verified: nothing actually reached job_semantic_chunks
 		}
@@ -137,8 +138,8 @@ func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cf
 			log.Printf("AUDIT ban key=%d reason=3_consecutive_spot_check_failures last_submission=%d job=%d",
 				keyID, submissionID, item.JobID)
 		}
-		if err := lease.Release(ctx, pool, item.JobID, keyID); err != nil {
-			log.Printf("submit: release lease for job %d, key %d: %v", item.JobID, keyID, err)
+		if err := lease.Release(ctx, pool, item.OutboxID, keyID); err != nil {
+			log.Printf("submit: release lease for outbox row %d (job %d), key %d: %v", item.OutboxID, item.JobID, keyID, err)
 		}
 	default: // OutcomeDeferredTEIUnavailable: leave pending, no reputation change
 		return

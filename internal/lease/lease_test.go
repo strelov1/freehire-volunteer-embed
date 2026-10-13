@@ -182,6 +182,57 @@ func TestClaim_PrefersOldestPostedJobFirst(t *testing.T) {
 	}
 }
 
+// TestClaim_SameJobTwoOutboxRows_BothClaimedWithDistinctOutboxIDs guards
+// against a real production incident (2026-10-13): a job mid-migration
+// between two embedding model versions has TWO semantic_outbox rows (one
+// per target_model). Both are claimable in the same batch, and each must
+// keep its own identity — collapsing them to one indistinguishable "job 42"
+// claim is what let promoting one submission silently delete the other's
+// still-pending outbox row (see freehire-ops' incident writeup).
+func TestClaim_SameJobTwoOutboxRows_BothClaimedWithDistinctOutboxIDs(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	jobID := seedJob(t, pool, "mid-migration-job", "desc")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5-old')
+	`, jobID); err != nil {
+		t.Fatalf("seed old-model outbox row: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5-chunked-v1')
+	`, jobID); err != nil {
+		t.Fatalf("seed chunked-v1 outbox row: %v", err)
+	}
+
+	claimed, err := Claim(ctx, pool, 1, 10, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(claimed) != 2 {
+		t.Fatalf("len(claimed) = %d, want 2 (both outbox rows for this job)", len(claimed))
+	}
+	if claimed[0].JobID != jobID || claimed[1].JobID != jobID {
+		t.Fatalf("expected both claims for job %d, got %+v", jobID, claimed)
+	}
+	if claimed[0].OutboxID == 0 || claimed[1].OutboxID == 0 {
+		t.Fatalf("expected non-zero OutboxID on both claims, got %+v", claimed)
+	}
+	if claimed[0].OutboxID == claimed[1].OutboxID {
+		t.Errorf("expected distinct OutboxID per outbox row, got the same value %d twice", claimed[0].OutboxID)
+	}
+
+	var leaseCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM volunteer_leases WHERE job_id = $1`, jobID,
+	).Scan(&leaseCount); err != nil {
+		t.Fatalf("counting volunteer_leases: %v", err)
+	}
+	if leaseCount != 2 {
+		t.Errorf("volunteer_leases rows for job %d = %d, want 2 (one per outbox row, not collapsed to one per job)", jobID, leaseCount)
+	}
+}
+
 func TestClaim_RecordsLeaseholderInVolunteerLeases(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()

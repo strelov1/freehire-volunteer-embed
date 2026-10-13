@@ -35,7 +35,7 @@ func runOnce(ctx context.Context, lease leaseFunc, embed embedFunc, submit submi
 			log.Printf("embed job %d: %v (skipping, will be re-leased later)", job.ID, err)
 			continue
 		}
-		submissions = append(submissions, client.Submission{JobID: job.ID, Vector: vector})
+		submissions = append(submissions, client.Submission{OutboxID: job.OutboxID, JobID: job.ID, Vector: vector})
 	}
 
 	result := runResult{Leased: len(jobs)}

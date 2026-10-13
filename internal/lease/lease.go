@@ -14,8 +14,9 @@ import (
 )
 
 type ClaimedJob struct {
-	JobID int64
-	Text  string
+	OutboxID int64
+	JobID    int64
+	Text     string
 }
 
 // Claim atomically claims up to batchSize pending jobs for keyID, oldest
@@ -50,6 +51,7 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, 
 		FROM claimable c
 		WHERE so.id = c.id
 		RETURNING
+			so.id,
 			so.job_id,
 			(SELECT title FROM jobs WHERE jobs.id = so.job_id),
 			(SELECT company FROM jobs WHERE jobs.id = so.job_id),
@@ -61,15 +63,16 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, 
 
 	var claimed []ClaimedJob
 	for rows.Next() {
-		var jobID int64
+		var outboxID, jobID int64
 		var title, company, description string
-		if err := rows.Scan(&jobID, &title, &company, &description); err != nil {
+		if err := rows.Scan(&outboxID, &jobID, &title, &company, &description); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("lease: scan claimed row: %w", err)
 		}
 		claimed = append(claimed, ClaimedJob{
-			JobID: jobID,
-			Text:  jobtext.FormatForEmbedding(title, company, description),
+			OutboxID: outboxID,
+			JobID:    jobID,
+			Text:     jobtext.FormatForEmbedding(title, company, description),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -79,12 +82,12 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, keyID int64, batchSize int, 
 	expiresAt := time.Now().Add(leaseDuration)
 	for _, job := range claimed {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO volunteer_leases (job_id, leased_by_key_id, expires_at)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (job_id) DO UPDATE
+			INSERT INTO volunteer_leases (outbox_id, job_id, leased_by_key_id, expires_at)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (outbox_id) DO UPDATE
 			SET leased_by_key_id = EXCLUDED.leased_by_key_id, expires_at = EXCLUDED.expires_at
-		`, job.JobID, keyID, expiresAt); err != nil {
-			return nil, fmt.Errorf("lease: record leaseholder for job %d: %w", job.JobID, err)
+		`, job.OutboxID, job.JobID, keyID, expiresAt); err != nil {
+			return nil, fmt.Errorf("lease: record leaseholder for outbox row %d (job %d): %w", job.OutboxID, job.JobID, err)
 		}
 	}
 

@@ -10,8 +10,13 @@ import (
 )
 
 type submitRequestItem struct {
-	JobID  int64     `json:"job_id"`
-	Vector []float64 `json:"vector"`
+	// OutboxID must be the same value the matching lease response gave for
+	// this job — a job can have more than one outstanding semantic_outbox
+	// row at once, and job_id alone cannot say which one this submission
+	// resolves.
+	OutboxID int64     `json:"outbox_id"`
+	JobID    int64     `json:"job_id"`
+	Vector   []float64 `json:"vector"`
 }
 
 type submitRequestBody struct {
@@ -60,7 +65,7 @@ func SubmitHandler(pool *pgxpool.Pool, cfg config.Config) http.Handler {
 
 		items := make([]submit.Item, len(body.Submissions))
 		for i, s := range body.Submissions {
-			items[i] = submit.Item{JobID: s.JobID, Vector: s.Vector}
+			items[i] = submit.Item{OutboxID: s.OutboxID, JobID: s.JobID, Vector: s.Vector}
 		}
 
 		results := submit.Submit(r.Context(), pool, keyID, items, cfg.TrustedTEIURL, cfg)

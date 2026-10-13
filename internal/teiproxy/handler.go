@@ -11,11 +11,13 @@ import (
 // upstreamURL (the real trusted TEI's /embed) and return its response
 // verbatim — /high/embed for volunteer spot-check verification, /low/embed
 // for hire's own backfill worker. The only difference between them is
-// which Dispatcher lane they go through.
-func NewHandler(d *Dispatcher, upstreamURL string, httpClient *http.Client) http.Handler {
+// which Dispatcher lane they go through. apiKey, when non-empty, is sent
+// as a Bearer token to upstreamURL: this proxy holds the one shared
+// secret so neither caller needs to know it anymore.
+func NewHandler(d *Dispatcher, upstreamURL, apiKey string, httpClient *http.Client) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/high/embed", forwardHandler(d, LaneHigh, upstreamURL, httpClient))
-	mux.Handle("/low/embed", forwardHandler(d, LaneLow, upstreamURL, httpClient))
+	mux.Handle("/high/embed", forwardHandler(d, LaneHigh, upstreamURL, apiKey, httpClient))
+	mux.Handle("/low/embed", forwardHandler(d, LaneLow, upstreamURL, apiKey, httpClient))
 	return mux
 }
 
@@ -24,7 +26,7 @@ type forwardResult struct {
 	body   []byte
 }
 
-func forwardHandler(d *Dispatcher, lane Lane, upstreamURL string, httpClient *http.Client) http.Handler {
+func forwardHandler(d *Dispatcher, lane Lane, upstreamURL, apiKey string, httpClient *http.Client) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqBody, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -33,7 +35,7 @@ func forwardHandler(d *Dispatcher, lane Lane, upstreamURL string, httpClient *ht
 		}
 
 		result, err := Do(r.Context(), d, lane, func() (forwardResult, error) {
-			return forwardToUpstream(r.Context(), httpClient, upstreamURL, reqBody)
+			return forwardToUpstream(r.Context(), httpClient, upstreamURL, apiKey, reqBody)
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -45,12 +47,15 @@ func forwardHandler(d *Dispatcher, lane Lane, upstreamURL string, httpClient *ht
 	})
 }
 
-func forwardToUpstream(ctx context.Context, httpClient *http.Client, upstreamURL string, body []byte) (forwardResult, error) {
+func forwardToUpstream(ctx context.Context, httpClient *http.Client, upstreamURL, apiKey string, body []byte) (forwardResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		return forwardResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

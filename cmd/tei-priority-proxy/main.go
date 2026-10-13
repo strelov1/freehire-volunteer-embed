@@ -26,6 +26,7 @@ func main() {
 	if upstreamURL == "" {
 		log.Fatal("UPSTREAM_TEI_URL is required")
 	}
+	upstreamAPIKey := os.Getenv("UPSTREAM_TEI_API_KEY") // optional: empty if upstream needs none
 	// /high/embed and /low/embed carry no auth — safe only because this
 	// defaults to loopback. An operator setting LISTEN_ADDR explicitly is
 	// trusted to keep that property.
@@ -43,7 +44,7 @@ func main() {
 	// (internal/search/search/embed.go) — this proxy must never be the
 	// tighter timeout on a path hire's own worker already tolerates.
 	httpClient := &http.Client{Timeout: 60 * time.Second}
-	handler := teiproxy.NewHandler(d, upstreamURL, httpClient)
+	handler := teiproxy.NewHandler(d, upstreamURL, upstreamAPIKey, httpClient)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", limitBodySize(maxRequestBodyBytes, handler))

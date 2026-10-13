@@ -25,7 +25,7 @@ func TestHandler_ForwardsBodyAndResponseVerbatim(t *testing.T) {
 	defer cancel()
 	d.RunWorkers(ctx, 2)
 
-	h := teiproxy.NewHandler(d, upstream.URL, http.DefaultClient)
+	h := teiproxy.NewHandler(d, upstream.URL, "", http.DefaultClient)
 
 	req := httptest.NewRequest(http.MethodPost, "/high/embed", strings.NewReader("payload"))
 	rec := httptest.NewRecorder()
@@ -36,6 +36,35 @@ func TestHandler_ForwardsBodyAndResponseVerbatim(t *testing.T) {
 	}
 	if rec.Body.String() != "echo:payload" {
 		t.Errorf("body = %q, want %q", rec.Body.String(), "echo:payload")
+	}
+}
+
+// TestHandler_AddsUpstreamAPIKey guards the whole point of carrying an
+// API key at all: the real trusted TEI requires one, and neither caller
+// (hire's worker, the volunteer broker) should need to know it anymore
+// once they go through this proxy — it holds the one shared secret and
+// adds it on their behalf.
+func TestHandler_AddsUpstreamAPIKey(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	d := teiproxy.NewDispatcher(256)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.RunWorkers(ctx, 1)
+
+	h := teiproxy.NewHandler(d, upstream.URL, "secret-tei-key", http.DefaultClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/low/embed", strings.NewReader("x"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if gotAuth != "Bearer secret-tei-key" {
+		t.Errorf("upstream Authorization = %q, want %q", gotAuth, "Bearer secret-tei-key")
 	}
 }
 
@@ -52,7 +81,7 @@ func TestHandler_HighLanePreferredOverLowLaneUnderContention(t *testing.T) {
 	defer cancel()
 	d.RunWorkers(ctx, 1) // single worker: makes the race deterministic
 
-	h := teiproxy.NewHandler(d, upstream.URL, http.DefaultClient)
+	h := teiproxy.NewHandler(d, upstream.URL, "", http.DefaultClient)
 
 	var mu sync.Mutex
 	var order []string
@@ -88,7 +117,7 @@ func TestHandler_HighLanePreferredOverLowLaneUnderContention(t *testing.T) {
 
 func TestHandler_UnknownPath_Returns404(t *testing.T) {
 	d := teiproxy.NewDispatcher(256)
-	h := teiproxy.NewHandler(d, "http://127.0.0.1:1", http.DefaultClient)
+	h := teiproxy.NewHandler(d, "http://127.0.0.1:1", "", http.DefaultClient)
 
 	req := httptest.NewRequest(http.MethodPost, "/nope", nil)
 	rec := httptest.NewRecorder()

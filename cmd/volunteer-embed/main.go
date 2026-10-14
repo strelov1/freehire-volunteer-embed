@@ -13,9 +13,11 @@ import (
 	"github.com/strelov1/freehire-volunteer-embed/internal/ratelimit"
 )
 
-// maxRequestBodyBytes caps a lease/submit request body. A full batch of
-// 50 jobs' worth of 768-float vectors is well under this.
-const maxRequestBodyBytes = 1 << 20 // 1 MiB
+// maxRequestBodyBytes caps a lease/submit request body. A submit batch of
+// 500 jobs' worth of 768-float vectors, JSON-encoded, runs to roughly 8 MiB
+// (500 * 768 floats * ~21 bytes/float as text) — this leaves headroom above
+// that for whatever batch size a volunteer's LEASE_BATCH_SIZE_MAX allows.
+const maxRequestBodyBytes = 16 << 20 // 16 MiB
 
 // requestsPerSecond/burst bound how often a single key may call lease or
 // submit. Generous enough for a legitimate volunteer's steady loop, tight

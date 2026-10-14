@@ -65,12 +65,10 @@ func (a *adaptiveChunkSize) size() int {
 }
 
 // recordSuccess reports that a call embedding textCount texts took elapsed
-// time. The very first call only establishes the latency baseline — there
-// is nothing yet to compare it against.
+// time. textCount must be positive — adaptiveEmbedBatch, its only caller,
+// never slices an empty chunk. The very first call only establishes the
+// latency baseline — there is nothing yet to compare it against.
 func (a *adaptiveChunkSize) recordSuccess(textCount int, elapsed time.Duration) {
-	if textCount == 0 {
-		return
-	}
 	perText := elapsed / time.Duration(textCount)
 
 	if perText > adaptiveAbsoluteLatencyCeiling {

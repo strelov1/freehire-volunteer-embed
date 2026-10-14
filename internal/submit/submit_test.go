@@ -35,6 +35,26 @@ func fixtureVector() []float64 {
 	return v
 }
 
+// teiServerEchoing stands in for the trusted TEI: Submit now sends every
+// pending-check item's job text in ONE request, so a fixture that always
+// returns a single hardcoded vector would make tei.EmbedBatch itself fail
+// (it validates the response has one vector per requested text). This
+// decodes the request and returns vec once per text requested, whatever
+// the batch size.
+func teiServerEchoing(vec []float64) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			vectors[i] = vec
+		}
+		_ = json.NewEncoder(w).Encode(vectors)
+	}))
+}
+
 // seedLeasedJob seeds a job with one semantic_outbox row and a matching
 // lease on it, returning both ids — submissions are identified by job_id,
 // but a lease (and the promote path's DELETE) is scoped to the specific
@@ -222,9 +242,7 @@ func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T
 	}
 
 	submitted := fixtureVector()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([][]float64{submitted}) // trusted re-embedding matches exactly
-	}))
+	server := teiServerEchoing(submitted) // trusted re-embedding matches exactly
 	defer server.Close()
 
 	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: submitted}}, server.URL, testCfg())
@@ -303,9 +321,7 @@ func TestSubmit_SynchronousVerification_SiblingOutboxRowForSameJob_IsUntouched(t
 	}
 
 	submitted := fixtureVector()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([][]float64{submitted})
-	}))
+	server := teiServerEchoing(submitted)
 	defer server.Close()
 
 	// Only submit for outboxID1 — outboxID2 is left as a still-outstanding,
@@ -356,9 +372,7 @@ func TestSubmit_SynchronousVerification_MismatchedVector_EndsRejected(t *testing
 	submitted := fixtureVector()
 	trusted := make([]float64, 768)
 	trusted[0] = 1 // orthogonal-ish to submitted's uniform small values: low cosine similarity
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([][]float64{trusted})
-	}))
+	server := teiServerEchoing(trusted)
 	defer server.Close()
 
 	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: submitted}}, server.URL, testCfg())
@@ -423,9 +437,7 @@ func TestSubmit_ThirdConsecutiveFailure_BansTheKey(t *testing.T) {
 
 	mismatched := make([]float64, 768)
 	mismatched[0] = 1
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([][]float64{mismatched})
-	}))
+	server := teiServerEchoing(mismatched)
 	defer server.Close()
 
 	// This key is already past the full-check phase with consecutive_fails=2
@@ -443,26 +455,39 @@ func TestSubmit_ThirdConsecutiveFailure_BansTheKey(t *testing.T) {
 	}
 }
 
-// TestSubmit_ManyItemsNeedingVerification_RunConcurrentlyNotSequentially
-// guards the fix for a real production bottleneck: a key still in its
-// full-check window (every item re-embedded through the trusted TEI) took
-// roughly 1s per item processed strictly one at a time, so any batch above
-// ~25-30 items blew past the volunteer client's own 30s request timeout —
-// independent of server load from other volunteers. A slow-but-healthy TEI
-// stand-in here (50ms/call) proves items run concurrently: sequential would
-// take itemCount*50ms; bounded concurrency should finish in a small
-// multiple of that, not a sum of all of it.
-func TestSubmit_ManyItemsNeedingVerification_RunConcurrentlyNotSequentially(t *testing.T) {
+// TestSubmit_ManyItemsNeedingVerification_OneSharedTEICall guards the fix
+// for a real production bottleneck: a key still in its full-check window
+// (every item re-embedded through the trusted TEI) took roughly 1s per item
+// when checked one request at a time, so any batch above ~25-30 items blew
+// past the volunteer client's own request timeout -- and that didn't fully
+// go away even with per-item concurrency, once several volunteers were each
+// submitting large batches against the one shared trusted TEI at once.
+// Submit now makes exactly one TEI request per Submit call, covering every
+// pending-check item in that batch, regardless of item count. A
+// slow-but-healthy TEI stand-in here (200ms/call, call-counted) proves
+// that: 20 items would cost 20 calls (4s) the old way; one call (~200ms)
+// proves the fix.
+func TestSubmit_ManyItemsNeedingVerification_OneSharedTEICall(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 	const keyID = int64(1)
 	const itemCount = 20
-	const perCallDelay = 50 * time.Millisecond
+	const perCallDelay = 200 * time.Millisecond
 
 	submitted := fixtureVector()
+	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		time.Sleep(perCallDelay)
-		_ = json.NewEncoder(w).Encode([][]float64{submitted})
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			vectors[i] = submitted
+		}
+		_ = json.NewEncoder(w).Encode(vectors)
 	}))
 	defer server.Close()
 
@@ -482,10 +507,12 @@ func TestSubmit_ManyItemsNeedingVerification_RunConcurrentlyNotSequentially(t *t
 		}
 	}
 
-	sequentialFloor := itemCount * perCallDelay
-	if elapsed >= sequentialFloor {
-		t.Errorf("Submit of %d items took %s, want well under the fully-sequential floor of %s — items are not running concurrently",
-			itemCount, elapsed, sequentialFloor)
+	if calls != 1 {
+		t.Errorf("TEI received %d requests for a batch of %d items, want exactly 1", calls, itemCount)
+	}
+	if elapsed >= itemCount*perCallDelay {
+		t.Errorf("Submit of %d items took %s, want well under the old per-item-call floor of %s",
+			itemCount, elapsed, itemCount*perCallDelay)
 	}
 }
 
@@ -565,22 +592,20 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	}
 }
 
-// TestVerifySubmission_PromoteFailsIndependentlyOfContext_LeavesRowPending
-// guards against a specific regression caught in review: a Promote failure
-// that has nothing to do with the request's own context being cancelled
-// (e.g. a transient DB error) must not still finalize the submission as
-// "verified" — that would claim a vector reached job_semantic_chunks when
-// it never did, with no worker anywhere to ever revisit it.
+// TestFinishChecked_PromoteFails_LeavesRowPending guards against a specific
+// regression caught in review: a Promote failure must not still finalize
+// the submission as "verified" — that would claim a vector reached
+// job_semantic_chunks when it never did, with no worker anywhere to ever
+// revisit it.
 //
-// It calls verifySubmission directly (this test is in package submit) with
-// a vector whose dimension doesn't match job_semantic_chunks.embedding's
-// vector(768) column, forcing Promote's INSERT to fail for a reason wholly
-// unrelated to ctx. The trusted server returns a vector of the same
-// (wrong) length so the cosine comparison still matches and reaches
-// OutcomeVerifiedPassedCheck — Submit's own public validVector gate would
-// normally reject a 768-length mismatch before this point, so this test
-// deliberately bypasses it to exercise verifySubmission in isolation.
-func TestVerifySubmission_PromoteFailsIndependentlyOfContext_LeavesRowPending(t *testing.T) {
+// It calls finishChecked directly (this test is in package submit) with a
+// vector whose dimension doesn't match job_semantic_chunks.embedding's
+// vector(768) column, forcing Promote's INSERT to fail. The "trusted"
+// vector passed in is identical, so the cosine comparison still matches —
+// Submit's own public validVector gate would normally reject a
+// 768-length mismatch before this point, so this test deliberately
+// bypasses it to exercise finishChecked in isolation.
+func TestFinishChecked_PromoteFails_LeavesRowPending(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 	const keyID = int64(1)
@@ -594,8 +619,8 @@ func TestVerifySubmission_PromoteFailsIndependentlyOfContext_LeavesRowPending(t 
 	// volunteer_submissions.embedding is ALSO vector(768), so this row's own
 	// placeholder must be a valid 768-length vector — the dimension
 	// mismatch this test exercises is specific to job_semantic_chunks,
-	// triggered below via a short vector passed directly to
-	// verifySubmission, independent of what's stored on this seed row.
+	// triggered below via a short vector passed directly to finishChecked,
+	// independent of what's stored on this seed row.
 	wrongDimensionVector := []float64{0.1, 0.2, 0.3}
 	var submissionID int64
 	if err := pool.QueryRow(ctx, `
@@ -606,13 +631,9 @@ func TestVerifySubmission_PromoteFailsIndependentlyOfContext_LeavesRowPending(t 
 		t.Fatalf("seed submission: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([][]float64{wrongDimensionVector}) // matches exactly -> OutcomeVerifiedPassedCheck
-	}))
-	defer server.Close()
-
 	item := Item{OutboxID: 1, JobID: jobID, Vector: wrongDimensionVector}
-	verifySubmission(ctx, pool, server.URL, testCfg(), keyID, submissionID, item)
+	pc := pendingCheck{submissionID: submissionID, item: item}
+	finishChecked(ctx, pool, keyID, pc, wrongDimensionVector) // identical vectors -> cosine matches
 
 	var status string
 	if err := pool.QueryRow(ctx, `SELECT status FROM volunteer_submissions WHERE id = $1`, submissionID).Scan(&status); err != nil {

@@ -17,7 +17,8 @@ import (
 // runs synchronously inside a volunteer's submit request (see
 // internal/submit), so a slow — not down, just slow — trusted TEI must not
 // be allowed to hang that request indefinitely; it should instead fail fast
-// into OutcomeDeferredTEIUnavailable like an unreachable one does. A
+// and leave the batch's pending checks deferred, same as an unreachable
+// one does. A
 // variable, not a const, so tests can shrink it instead of sleeping for the
 // production default.
 //

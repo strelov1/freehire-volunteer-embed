@@ -12,8 +12,7 @@ import (
 const banThreshold = 3
 
 // RecordSkipped records that a submission was trusted on track record
-// without an actual TEI re-embedding (verify.OutcomeVerifiedWithoutCheck).
-// It only advances total_evaluated — per reputation.ShouldCheck's contract,
+// without an actual TEI re-embedding. It only advances total_evaluated — per reputation.ShouldCheck's contract,
 // every submission routed through the check decision must advance this
 // counter, whether or not it was actually checked — and leaves the
 // pass/fail streaks untouched, since skipping a check teaches nothing new
@@ -33,7 +32,7 @@ func RecordSkipped(ctx context.Context, pool *pgxpool.Pool, keyID int64) error {
 }
 
 // RecordPassed records a submission that was actually re-embedded and
-// matched (verify.OutcomeVerifiedPassedCheck).
+// matched.
 func RecordPassed(ctx context.Context, pool *pgxpool.Pool, keyID int64) error {
 	_, err := pool.Exec(ctx, `
 		INSERT INTO volunteer_reputation (key_id, total_evaluated, consecutive_passes, consecutive_fails)
@@ -51,7 +50,7 @@ func RecordPassed(ctx context.Context, pool *pgxpool.Pool, keyID int64) error {
 }
 
 // RecordFailed records a submission that was actually re-embedded and did
-// not match (verify.OutcomeRejectedFailedCheck), and bans the key once it
+// not match, and bans the key once it
 // reaches banThreshold consecutive failures. justBanned is true exactly
 // when this call is what tipped the key over that threshold — callers use
 // it to emit a distinct audit log line for a ban decision (tasks.md 9.2:

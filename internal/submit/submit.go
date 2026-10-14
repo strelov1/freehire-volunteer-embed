@@ -18,18 +18,16 @@ import (
 	"github.com/strelov1/freehire-volunteer-embed/internal/pgvec"
 	"github.com/strelov1/freehire-volunteer-embed/internal/promote"
 	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
+	"github.com/strelov1/freehire-volunteer-embed/internal/tei"
 	"github.com/strelov1/freehire-volunteer-embed/internal/verify"
 )
 
 const vectorDimension = 768
 
-// submitConcurrency bounds how many items from one batch are processed at
-// once. Each spot-checked item makes its own round trip to the trusted TEI
-// (~1s observed in production), and that used to run one item at a time —
-// any batch above ~25-30 items checked at that rate alone exceeded the
-// volunteer client's 30s request timeout. Bounded, not unlimited, so one
-// huge batch can't flood the trusted TEI or the DB pool with every item at
-// once.
+// submitConcurrency bounds how many items from one batch stage (DB-only:
+// lease check, insert, job text lookup, reputation read) or finish
+// (DB-only: record outcome, promote) at once. Bounded, not unlimited, so
+// one huge batch can't flood the DB pool with every item at once.
 const submitConcurrency = 8
 
 type Status int
@@ -55,41 +53,102 @@ type Result struct {
 	Status Status
 }
 
-// Submit processes each item independently: a rejection OR an infrastructure
-// error on one item never affects the others, and submission never touches
-// reputation (reputation only changes as a result of spot-check
-// verification, not at submission time — see internal/reputation group 7).
-// An accepted item is also spot-check verified synchronously, before this
-// call returns: there is no separate background worker (see design.md).
+// pendingCheck is an item staged in volunteer_submissions whose reputation
+// says it needs an actual spot-check, carrying what finishing it later
+// needs: which row to finalize, the submitted vector to compare, and the
+// job text to re-embed.
+type pendingCheck struct {
+	submissionID int64
+	item         Item
+	jobText      string
+}
+
+// Submit processes each item independently: a rejection OR an
+// infrastructure error on one item never affects the others, and
+// submission never touches reputation (reputation only changes as a result
+// of spot-check verification, not at submission time — see
+// internal/reputation group 7). An accepted item is also spot-check
+// verified synchronously, before this call returns: there is no separate
+// background worker (see design.md).
 //
-// Items run with bounded concurrency (submitConcurrency), not strictly in
-// order. For items sharing a key, this means the check-rate decision
-// (reputation.ShouldCheck) can read a stale, pre-increment snapshot of that
-// key's counters — a batch can sample a slightly different set of items for
-// checking than a fully sequential run would have. The counters themselves
-// do not lose updates under this: each Record* call is one atomic SQL
-// UPDATE, serialized by Postgres's own row lock regardless of Go-level
-// concurrency.
+// Every item selected for a check is re-embedded through the trusted TEI in
+// ONE shared request for the whole batch, not one request per item — this
+// is the fix for a real incident: with one TEI round trip per item, even
+// bounded per-item concurrency couldn't keep a single shared trusted TEI
+// ahead of several volunteers each submitting large batches at once, and
+// batches routinely blew the client's request timeout.
+//
+// Staging (lease check, insert, check-vs-skip decision) and finishing
+// (recording the outcome) each run with bounded concurrency
+// (submitConcurrency), not strictly in order. For items sharing a key, this
+// means the check-vs-skip decision (reputation.ShouldCheck) can read a
+// stale, pre-increment snapshot of that key's counters — a batch can sample
+// a slightly different set of items for checking than a fully sequential
+// run would have. The counters themselves do not lose updates under this:
+// each Record* call is one atomic SQL UPDATE, serialized by Postgres's own
+// row lock regardless of Go-level concurrency.
 func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
+	pendingSlots := make([]*pendingCheck, len(items))
 
-	var g errgroup.Group
-	g.SetLimit(submitConcurrency)
+	var stage errgroup.Group
+	stage.SetLimit(submitConcurrency)
 	for i, item := range items {
 		i, item := i, item
-		g.Go(func() error {
-			results[i] = Result{JobID: item.JobID, Status: submitOne(ctx, pool, keyID, item, teiURL, cfg)}
+		stage.Go(func() error {
+			status, pc := stageOne(ctx, pool, keyID, item, cfg)
+			results[i] = Result{JobID: item.JobID, Status: status}
+			pendingSlots[i] = pc
 			return nil
 		})
 	}
-	_ = g.Wait() // submitOne never returns an error; failure is a Status value
+	_ = stage.Wait() // stageOne never returns an error; failure is a Status value
+
+	var pending []pendingCheck
+	for _, pc := range pendingSlots {
+		if pc != nil {
+			pending = append(pending, *pc)
+		}
+	}
+	if len(pending) == 0 {
+		return results
+	}
+
+	jobTexts := make([]string, len(pending))
+	for i, pc := range pending {
+		jobTexts[i] = pc.jobText
+	}
+	trustedVectors, err := tei.EmbedBatch(ctx, teiURL, cfg.TrustedTEIAPIKey, jobTexts)
+	if err != nil {
+		// Trusted TEI unreachable or erroring for the whole batch: every
+		// pending item stays pending with no reputation change, exactly
+		// like a single deferred check before this change — a later
+		// submission gets another chance.
+		return results
+	}
+
+	var finish errgroup.Group
+	finish.SetLimit(submitConcurrency)
+	for i, pc := range pending {
+		i, pc := i, pc
+		finish.Go(func() error {
+			finishChecked(ctx, pool, keyID, pc, trustedVectors[i])
+			return nil
+		})
+	}
+	_ = finish.Wait()
 
 	return results
 }
 
-func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, teiURL string, cfg config.Config) Status {
+// stageOne validates item, confirms its lease, and stages it in
+// volunteer_submissions. If the key's reputation says this one should be
+// spot-checked, it returns a *pendingCheck for the batched TEI call;
+// otherwise it finishes the item immediately (trusted on track record, no
+// TEI call needed at all).
+func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, cfg config.Config) (Status, *pendingCheck) {
 	if !validVector(item.Vector) {
-		return StatusInvalidVector
+		return StatusInvalidVector, nil
 	}
 
 	var leased bool
@@ -100,10 +159,10 @@ func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, 
 		)
 	`, item.OutboxID, keyID).Scan(&leased)
 	if err != nil {
-		return StatusError
+		return StatusError, nil
 	}
 	if !leased {
-		return StatusNotLeased
+		return StatusNotLeased, nil
 	}
 
 	var submissionID int64
@@ -112,76 +171,78 @@ func submitOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, 
 		VALUES ($1, $2, $3, 'pending')
 		RETURNING id
 	`, item.JobID, keyID, pgvec.Format(item.Vector)).Scan(&submissionID); err != nil {
-		return StatusError
+		return StatusError, nil
 	}
 
-	verifySubmission(ctx, pool, teiURL, cfg, keyID, submissionID, item)
-
-	return StatusAccepted
-}
-
-// verifySubmission runs the spot-check decision for a just-staged submission
-// and records the outcome on its volunteer_submissions row. It deliberately
-// swallows its own errors (job text lookup, TEI call) rather than failing
-// the submission request: a verification hiccup leaves the row pending for
-// a later pass, it does not change what the volunteer's HTTP call saw.
-func verifySubmission(ctx context.Context, pool *pgxpool.Pool, teiURL string, cfg config.Config, keyID, submissionID int64, item Item) {
+	// From here on, any failure leaves the row pending for a later pass
+	// rather than failing the request — a verification hiccup must not
+	// change what the volunteer's HTTP call saw.
 	jobText, err := hiredata.JobText(ctx, pool, item.JobID)
 	if err != nil {
-		return
+		return StatusAccepted, nil
 	}
 	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
 	if err != nil {
-		return
+		return StatusAccepted, nil
 	}
 
-	outcome := verify.Evaluate(ctx, teiURL, cfg, totalEvaluated, consecutivePasses, jobText, item.Vector)
+	if !reputation.ShouldCheck(totalEvaluated, consecutivePasses, cfg) {
+		finishSkipped(ctx, pool, keyID, submissionID, item)
+		return StatusAccepted, nil
+	}
 
-	var newStatus string
-	switch outcome {
-	case verify.OutcomeVerifiedWithoutCheck:
-		if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
-			log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
-		}
-		if err := promote.Promote(ctx, pool, item.OutboxID, item.JobID, item.Vector); err != nil {
-			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
-			return // do not mark verified: nothing actually reached job_semantic_chunks
-		}
-		newStatus = "verified"
-	case verify.OutcomeVerifiedPassedCheck:
+	return StatusAccepted, &pendingCheck{submissionID: submissionID, item: item, jobText: jobText}
+}
+
+// finishSkipped records a submission trusted on track record, with no TEI
+// call at all.
+func finishSkipped(ctx context.Context, pool *pgxpool.Pool, keyID, submissionID int64, item Item) {
+	if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
+		log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
+	}
+	if err := promote.Promote(ctx, pool, item.OutboxID, item.JobID, item.Vector); err != nil {
+		log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
+		return // do not finalize: nothing actually reached job_semantic_chunks
+	}
+	finalize(ctx, pool, keyID, submissionID, item.JobID, "verified")
+}
+
+// finishChecked records the outcome of a submission that was re-embedded
+// through the trusted TEI as part of this batch's single shared call.
+func finishChecked(ctx context.Context, pool *pgxpool.Pool, keyID int64, pc pendingCheck, trustedVector []float64) {
+	if verify.Cosine(pc.item.Vector, trustedVector) >= verify.MatchThreshold {
 		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
-			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, submissionID, err)
+			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, pc.submissionID, err)
 		}
-		if err := promote.Promote(ctx, pool, item.OutboxID, item.JobID, item.Vector); err != nil {
-			log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
-			return // do not mark verified: nothing actually reached job_semantic_chunks
+		if err := promote.Promote(ctx, pool, pc.item.OutboxID, pc.item.JobID, pc.item.Vector); err != nil {
+			log.Printf("submit: promote job %d, submission %d: %v", pc.item.JobID, pc.submissionID, err)
+			return // do not finalize: nothing actually reached job_semantic_chunks
 		}
-		newStatus = "verified"
-	case verify.OutcomeRejectedFailedCheck:
-		newStatus = "rejected"
-		justBanned, err := reputation.RecordFailed(ctx, pool, keyID)
-		if err != nil {
-			log.Printf("submit: record failed for key %d, submission %d: %v", keyID, submissionID, err)
-		}
-		if justBanned {
-			log.Printf("AUDIT ban key=%d reason=3_consecutive_spot_check_failures last_submission=%d job=%d",
-				keyID, submissionID, item.JobID)
-		}
-		if err := lease.Release(ctx, pool, item.OutboxID, keyID); err != nil {
-			log.Printf("submit: release lease for outbox row %d (job %d), key %d: %v", item.OutboxID, item.JobID, keyID, err)
-		}
-	default: // OutcomeDeferredTEIUnavailable: leave pending, no reputation change
+		finalize(ctx, pool, keyID, pc.submissionID, pc.item.JobID, "verified")
 		return
 	}
 
-	log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s",
-		keyID, item.JobID, submissionID, newStatus)
+	justBanned, err := reputation.RecordFailed(ctx, pool, keyID)
+	if err != nil {
+		log.Printf("submit: record failed for key %d, submission %d: %v", keyID, pc.submissionID, err)
+	}
+	if justBanned {
+		log.Printf("AUDIT ban key=%d reason=3_consecutive_spot_check_failures last_submission=%d job=%d",
+			keyID, pc.submissionID, pc.item.JobID)
+	}
+	if err := lease.Release(ctx, pool, pc.item.OutboxID, keyID); err != nil {
+		log.Printf("submit: release lease for outbox row %d (job %d), key %d: %v", pc.item.OutboxID, pc.item.JobID, keyID, err)
+	}
+	finalize(ctx, pool, keyID, pc.submissionID, pc.item.JobID, "rejected")
+}
 
+func finalize(ctx context.Context, pool *pgxpool.Pool, keyID, submissionID, jobID int64, status string) {
+	log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s", keyID, jobID, submissionID, status)
 	if _, err := pool.Exec(ctx,
 		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
-		newStatus, submissionID,
+		status, submissionID,
 	); err != nil {
-		log.Printf("submit: finalize submission %d as %s: %v", submissionID, newStatus, err)
+		log.Printf("submit: finalize submission %d as %s: %v", submissionID, status, err)
 	}
 }
 

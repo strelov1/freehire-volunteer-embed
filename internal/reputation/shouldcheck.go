@@ -14,7 +14,7 @@ import "github.com/strelov1/freehire-volunteer-embed/internal/config"
 // counter so the rate never collapses to zero.
 //
 // Contract for callers: totalEvaluated must be incremented once per call to
-// this function — i.e. once per submission routed through verify.Evaluate —
+// this function — i.e. once per submission routed through this decision —
 // whether or not that call actually performed a check. Incrementing it only
 // when a check is actually performed would let the counter settle on a
 // value that is never a multiple of the active divisor, permanently

@@ -18,7 +18,15 @@ import (
 // deadline of its own, so a merely-slow (not down) server must not be
 // allowed to hang the poll loop indefinitely. A variable, not a const, so
 // tests can shrink it instead of sleeping for the production default.
-var requestTimeout = 30 * time.Second
+//
+// 55s, not 60s: nginx in front of the server has its own 60s default read
+// timeout on this path, so going past it buys nothing -- the proxy would
+// cut the connection first regardless of this client's own patience. Was
+// 30s; raised after live traffic showed a batch of 50-250 items can
+// legitimately take 25-29s to spot-check under real concurrent load from
+// multiple volunteers sharing one trusted TEI, routinely grazing the old
+// limit.
+var requestTimeout = 55 * time.Second
 
 type Job struct {
 	// OutboxID must be round-tripped unchanged in the matching Submission —

@@ -8,6 +8,7 @@ import (
 	"context"
 	"log"
 	"math"
+	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
@@ -168,6 +169,8 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 		// pending with no reputation change, exactly like a single
 		// deferred check before this change — a later submission gets
 		// another chance.
+		log.Printf("submit: trusted TEI call for %d pending chunk(s) across %d job(s): %v (deferring all)",
+			len(jobTexts), len(pendingGroups), err)
 		return results
 	}
 	for i, ref := range refs {
@@ -188,8 +191,19 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 	return results
 }
 
+// trustedTEIConcurrency bounds how many trustedTEIMaxBatch-sized sub-calls
+// to the trusted TEI run at once. A second real incident right after the
+// max-batch-size fix: dispatching sub-batches SEQUENTIALLY could add up
+// to more wall-clock time than the volunteer client's own request
+// timeout once several sub-batches were needed, so the client gave up
+// mid-flight and every pending chunk was deferred anyway — mirrors
+// hire's own embedBatch (internal/search/search/embed.go), which runs its
+// TEI-sized chunks concurrently for the same reason.
+const trustedTEIConcurrency = 8
+
 // embedInTEIMaxBatches calls tei.EmbedBatch in sub-batches of at most
-// trustedTEIMaxBatch texts, concatenating the results in order — the
+// trustedTEIMaxBatch texts, run with bounded concurrency
+// (trustedTEIConcurrency), concatenating the results in order — the
 // trusted TEI rejects a single call over its own --max-client-batch-size
 // outright, so one shared call covering a whole Submit request's pending
 // checks (the optimization this replaces a single unbounded call for)
@@ -198,14 +212,34 @@ func embedInTEIMaxBatches(ctx context.Context, teiURL, apiKey string, texts []st
 	if len(texts) <= trustedTEIMaxBatch {
 		return tei.EmbedBatch(ctx, teiURL, apiKey, texts)
 	}
-	vectors := make([][]float64, 0, len(texts))
+
+	type span struct{ start, end int }
+	var spans []span
 	for start := 0; start < len(texts); start += trustedTEIMaxBatch {
-		end := min(start+trustedTEIMaxBatch, len(texts))
-		chunkVectors, err := tei.EmbedBatch(ctx, teiURL, apiKey, texts[start:end])
-		if err != nil {
-			return nil, err
-		}
-		vectors = append(vectors, chunkVectors...)
+		spans = append(spans, span{start, min(start+trustedTEIMaxBatch, len(texts))})
+	}
+
+	results := make([][][]float64, len(spans))
+	var g errgroup.Group
+	g.SetLimit(trustedTEIConcurrency)
+	for i, sp := range spans {
+		i, sp := i, sp
+		g.Go(func() error {
+			vecs, err := tei.EmbedBatch(ctx, teiURL, apiKey, texts[sp.start:sp.end])
+			if err != nil {
+				return err
+			}
+			results[i] = vecs
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	vectors := make([][]float64, 0, len(texts))
+	for _, r := range results {
+		vectors = append(vectors, r...)
 	}
 	return vectors, nil
 }
@@ -237,6 +271,7 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 
 	expected, err := hiredata.JobChunks(ctx, pool, jobID)
 	if err != nil {
+		log.Printf("submit: job %d: fetching current chunk set: %v (leaving %d staged chunk(s) pending)", jobID, err, len(staged))
 		return nil // leave whatever staged for a later pass
 	}
 	if !matchesExpectedChunkSet(staged, len(expected)) {
@@ -244,11 +279,14 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		// CURRENT chunk set (its description may have changed since this
 		// batch was leased) — leave every staged row pending rather than
 		// promote a partial set.
+		log.Printf("submit: job %d: submitted chunk set %v does not match current expected count %d (leaving pending)",
+			jobID, stagedChunkIndices(staged), len(expected))
 		return nil
 	}
 
 	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
 	if err != nil {
+		log.Printf("submit: key %d: fetching reputation counts: %v (leaving %d staged chunk(s) pending)", keyID, err, len(staged))
 		return nil
 	}
 
@@ -270,6 +308,16 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		pg.submittedVecs[chunkIndex] = si.vector
 	}
 	return pg
+}
+
+// stagedChunkIndices lists staged's keys, sorted, for diagnostic logging.
+func stagedChunkIndices(staged map[int]stagedItem) []int {
+	indices := make([]int, 0, len(staged))
+	for i := range staged {
+		indices = append(indices, i)
+	}
+	sort.Ints(indices)
+	return indices
 }
 
 // matchesExpectedChunkSet reports whether staged's keys are exactly

@@ -640,6 +640,60 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	}
 }
 
+// TestSubmit_ManyPendingChecks_TEISubBatchesRunConcurrently guards a second
+// real production incident found right after the max-batch-size fix
+// (2026-10-14): chunking a large pending-check set into sequential
+// 32-item sub-requests to the trusted TEI could add up to MORE wall-clock
+// time than the client's own request timeout once several sub-batches
+// were needed, so the client gave up and the request's context was
+// cancelled mid-flight, deferring everything anyway. A slow-but-healthy
+// TEI stand-in here (150ms/sub-batch) proves sub-batches run
+// concurrently: 4 sub-batches run sequentially would cost 600ms;
+// concurrent dispatch should finish in a small multiple of 150ms, not a
+// sum of all of it.
+func TestSubmit_ManyPendingChecks_TEISubBatchesRunConcurrently(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+	const itemCount = 4 * trustedTEIMaxBatch // 4 sub-batches
+	const perCallDelay = 150 * time.Millisecond
+
+	submitted := fixtureVector()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(perCallDelay)
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			vectors[i] = submitted
+		}
+		_ = json.NewEncoder(w).Encode(vectors)
+	}))
+	defer server.Close()
+
+	items := make([]Item, itemCount)
+	for i := 0; i < itemCount; i++ {
+		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: submitted}
+	}
+
+	start := time.Now()
+	results := Submit(ctx, pool, keyID, items, server.URL, testCfg())
+	elapsed := time.Since(start)
+
+	for i, r := range results {
+		if r.Status != StatusAccepted {
+			t.Errorf("results[%d].Status = %v, want StatusAccepted", i, r.Status)
+		}
+	}
+	if elapsed >= 4*perCallDelay {
+		t.Errorf("Submit across 4 TEI sub-batches took %s, want well under the fully-sequential floor of %s",
+			elapsed, 4*perCallDelay)
+	}
+}
+
 // TestSubmit_ManyPendingChecks_ChunksTEICallsToItsOwnMaxBatchSize guards a
 // real production incident (2026-10-14): the trusted TEI server enforces
 // its own --max-client-batch-size (32, matching hire's teiMaxBatch) and

@@ -54,12 +54,11 @@ func Load() (Config, error) {
 		pollInterval = d
 	}
 
-	// Default 0 means no chunking: the whole leased batch goes to the local
-	// embedder in one call, same as before this setting existed. A naive
-	// local embedder with no batching limit of its own can thrash a
-	// machine's memory if handed a large BATCH_SIZE at once, so this lets a
-	// volunteer keep a large, network-efficient lease size while capping
-	// how much their own hardware is asked to embed per call.
+	// Default 0 means the client auto-tunes this itself: start small, grow
+	// while the local embedder stays fast, back off at the first sign of
+	// trouble (see cmd/volunteer-client/adaptive.go). Setting this pins a
+	// fixed size instead and disables auto-tuning — the manual override for
+	// a volunteer who wants to cap it themselves.
 	localEmbedChunkSize := 0
 	if v := os.Getenv("LOCAL_EMBED_CHUNK_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)

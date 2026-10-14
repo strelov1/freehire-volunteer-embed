@@ -31,15 +31,27 @@ func main() {
 	lease := func(ctx context.Context) ([]client.Job, error) {
 		return client.Lease(ctx, httpClient, cfg.ServerURL, cfg.APIKey, cfg.BatchSize)
 	}
-	embedBatch := chunkedEmbedBatch(func(ctx context.Context, texts []string) ([][]float64, error) {
+	rawEmbedBatch := func(ctx context.Context, texts []string) ([][]float64, error) {
 		return tei.EmbedBatch(ctx, cfg.LocalTEIURL, cfg.LocalTEIAPIKey, texts)
-	}, cfg.LocalEmbedChunkSize)
+	}
+
+	var embedBatch embedBatchFunc
+	if cfg.LocalEmbedChunkSize > 0 {
+		// An explicit size pins it and disables auto-tuning — the escape
+		// hatch for a volunteer who wants to cap this by hand.
+		embedBatch = chunkedEmbedBatch(rawEmbedBatch, cfg.LocalEmbedChunkSize)
+		log.Printf("volunteer-client starting: server=%s local-tei=%s batch-size=%d local-embed-chunk-size=%d (fixed)",
+			cfg.ServerURL, cfg.LocalTEIURL, cfg.BatchSize, cfg.LocalEmbedChunkSize)
+	} else {
+		sizer := newAdaptiveChunkSize(adaptiveSeedChunkSize, adaptiveMinChunkSize, adaptiveMaxChunkSize)
+		embedBatch = adaptiveEmbedBatch(rawEmbedBatch, sizer, time.Now)
+		log.Printf("volunteer-client starting: server=%s local-tei=%s batch-size=%d local-embed-chunk-size=auto (seed %d)",
+			cfg.ServerURL, cfg.LocalTEIURL, cfg.BatchSize, adaptiveSeedChunkSize)
+	}
+
 	submit := func(ctx context.Context, submissions []client.Submission) ([]client.Result, error) {
 		return client.Submit(ctx, httpClient, cfg.ServerURL, cfg.APIKey, submissions)
 	}
-
-	log.Printf("volunteer-client starting: server=%s local-tei=%s batch-size=%d local-embed-chunk-size=%d",
-		cfg.ServerURL, cfg.LocalTEIURL, cfg.BatchSize, cfg.LocalEmbedChunkSize)
 
 	for {
 		result, err := runOnce(ctx, lease, embedBatch, submit)

@@ -107,22 +107,26 @@ For the API key — **reuse the same one already in use** (ask me, or find it wh
 SERVER_URL="https://freehire.me" \
 API_KEY="<your fhk_ key>" \
 LOCAL_TEI_URL="http://127.0.0.1:8080/embed" \
-BATCH_SIZE=5 \
-LOCAL_EMBED_CHUNK_SIZE=5 \
+BATCH_SIZE=50 \
 POLL_INTERVAL=10s \
 ./volunteer-client-darwin-arm64   # use the binary name matching your OS
 ```
 
-`BATCH_SIZE` is how many jobs the client pulls from the server per round trip —
-raising it reduces network overhead. `LOCAL_EMBED_CHUNK_SIZE` is a separate
-knob: the most texts the client will ever hand to `server.py` in a single
-call, regardless of `BATCH_SIZE`. `server.py` above has no batching logic of
-its own, so if `BATCH_SIZE` is raised well past `LOCAL_EMBED_CHUNK_SIZE`, the
-client transparently splits the work into chunks of that size before calling
-it — keeping a big, efficient lease from ever overwhelming your machine in
-one call. Start small (5–10) and only raise it once you've confirmed your
-machine handles that size comfortably. Leaving it unset (or `0`) sends the
-whole batch to the local embedder in one call — the old behavior.
+`BATCH_SIZE` is how many jobs the client pulls from the server per round trip
+— raising it reduces network overhead. By default the client does **not**
+hand that whole batch to `server.py` in one call: it starts by sending just 5
+texts at a time, and automatically grows that number for as long as the
+local embedder keeps responding quickly, backing off the moment it slows
+down or errors. This runs by itself — no tuning required, and it keeps
+re-adjusting for as long as the client keeps running.
+
+If you want to pin it to a fixed size instead (e.g. to deliberately keep an
+older/shared machine throttled), set `LOCAL_EMBED_CHUNK_SIZE` and the
+auto-tuning is skipped entirely:
+
+```bash
+LOCAL_EMBED_CHUNK_SIZE=5 \
+```
 
 ## How to confirm it's actually working
 

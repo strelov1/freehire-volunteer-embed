@@ -301,3 +301,42 @@ func TestReplace_ClearsOnlyItsOwnOutboxRow(t *testing.T) {
 		t.Errorf("replacing from outbox row %d deleted sibling row %d too (count=%d, want 1)", outboxID1, outboxID2, sibling2Count)
 	}
 }
+
+// TestReplace_OutboxRowMissing_ErrorsAndDoesNotStampNullModel guards the
+// model stamp's move from a separate SELECT into a subquery inside the
+// UPDATE (done to pipeline every statement into one round trip): a
+// vanished outboxID must still fail loudly, not silently stamp
+// semantic_embedded_model = NULL (which would mark the job "done" with a
+// garbage provenance value hire's own backfill could never match against).
+func TestReplace_OutboxRowMissing_ErrorsAndDoesNotStampNullModel(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	var jobID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ('promote-missing-outbox-job', 'd') RETURNING id`,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+
+	const nonexistentOutboxID = 999999999
+	if err := Replace(ctx, pool, nonexistentOutboxID, jobID, []ChunkVector{{ChunkIndex: 0, Vector: fixtureVector()}}); err == nil {
+		t.Fatal("Replace with a nonexistent outbox row: want an error, got nil")
+	}
+
+	var model *string
+	if err := pool.QueryRow(ctx, `SELECT semantic_embedded_model FROM jobs WHERE id = $1`, jobID).Scan(&model); err != nil {
+		t.Fatalf("querying jobs: %v", err)
+	}
+	if model != nil {
+		t.Errorf("semantic_embedded_model = %v, want untouched (NULL) after a failed Replace", *model)
+	}
+
+	var chunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM job_semantic_chunks WHERE job_id = $1`, jobID).Scan(&chunkCount); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Errorf("job_semantic_chunks count = %d, want 0 (failed Replace must roll back its own DELETE+INSERT too)", chunkCount)
+	}
+}

@@ -6,10 +6,12 @@ package submit
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
@@ -269,9 +271,26 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	expected, err := hiredata.JobChunks(ctx, pool, jobID)
-	if err != nil {
-		log.Printf("submit: job %d: fetching current chunk set: %v (leaving %d staged chunk(s) pending)", jobID, err, len(staged))
+	// JobChunks and GetCounts hit unrelated tables for unrelated keys
+	// (jobID vs keyID) — run them concurrently rather than one after the
+	// other, since under this service's real load both round trips were
+	// paying the host's full network latency sequentially for no reason.
+	var expected []string
+	var totalEvaluated, consecutivePasses int
+	var expectedErr, countsErr error
+	var fetch errgroup.Group
+	fetch.Go(func() error {
+		expected, expectedErr = hiredata.JobChunks(ctx, pool, jobID)
+		return nil
+	})
+	fetch.Go(func() error {
+		totalEvaluated, consecutivePasses, countsErr = reputation.GetCounts(ctx, pool, keyID)
+		return nil
+	})
+	_ = fetch.Wait()
+
+	if expectedErr != nil {
+		log.Printf("submit: job %d: fetching current chunk set: %v (leaving %d staged chunk(s) pending)", jobID, expectedErr, len(staged))
 		return nil // leave whatever staged for a later pass
 	}
 	if !matchesExpectedChunkSet(staged, len(expected)) {
@@ -284,9 +303,8 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
-	if err != nil {
-		log.Printf("submit: key %d: fetching reputation counts: %v (leaving %d staged chunk(s) pending)", keyID, err, len(staged))
+	if countsErr != nil {
+		log.Printf("submit: key %d: fetching reputation counts: %v (leaving %d staged chunk(s) pending)", keyID, countsErr, len(staged))
 		return nil
 	}
 
@@ -335,33 +353,32 @@ func matchesExpectedChunkSet(staged map[int]stagedItem, expectedCount int) bool 
 	return true
 }
 
-// stageOne validates one chunk and confirms its lease, then stages it in
-// volunteer_submissions.
+// stageOne validates one chunk and, in a single round trip, inserts it
+// into volunteer_submissions only if its lease is still held — the
+// WHERE-EXISTS subquery folds in what used to be a separate leased-check
+// SELECT before this INSERT, halving stageOne's own round trips. No rows
+// returned means either the lease is gone/expired or it never existed;
+// either way the caller should treat it as StatusNotLeased, since this
+// function has no way (and no need) to tell those two cases apart.
 func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) (Status, *stagedItem) {
 	if !validVector(item.Vector) {
 		return StatusInvalidVector, nil
 	}
 
-	var leased bool
-	err := pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM volunteer_leases
-			WHERE outbox_id = $1 AND leased_by_key_id = $2 AND expires_at > now()
-		)
-	`, item.OutboxID, keyID).Scan(&leased)
-	if err != nil {
-		return StatusError, nil
-	}
-	if !leased {
-		return StatusNotLeased, nil
-	}
-
 	var submissionID int64
-	if err := pool.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, chunk_index, status)
-		VALUES ($1, $2, $3, $4, 'pending')
+		SELECT $1, $2, $3, $4, 'pending'
+		WHERE EXISTS (
+			SELECT 1 FROM volunteer_leases
+			WHERE outbox_id = $5 AND leased_by_key_id = $2 AND expires_at > now()
+		)
 		RETURNING id
-	`, item.JobID, keyID, pgvec.Format(item.Vector), item.ChunkIndex).Scan(&submissionID); err != nil {
+	`, item.JobID, keyID, pgvec.Format(item.Vector), item.ChunkIndex, item.OutboxID).Scan(&submissionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StatusNotLeased, nil
+		}
 		return StatusError, nil
 	}
 
@@ -433,15 +450,22 @@ func chunkVectors(staged map[int]stagedItem) []promote.ChunkVector {
 	return out
 }
 
+// finalizeGroup marks every staged chunk's submission with the same final
+// status in one round trip (WHERE id = ANY) rather than one UPDATE per
+// chunk — a multi-chunk job otherwise paid one extra round trip per chunk
+// here for no reason, since every chunk in a group always finalizes
+// together.
 func finalizeGroup(ctx context.Context, pool *pgxpool.Pool, keyID, jobID int64, staged map[int]stagedItem, status string) {
+	ids := make([]int64, 0, len(staged))
 	for _, si := range staged {
 		log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s", keyID, jobID, si.submissionID, status)
-		if _, err := pool.Exec(ctx,
-			`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
-			status, si.submissionID,
-		); err != nil {
-			log.Printf("submit: finalize submission %d as %s: %v", si.submissionID, status, err)
-		}
+		ids = append(ids, si.submissionID)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = ANY($2)`,
+		status, ids,
+	); err != nil {
+		log.Printf("submit: finalize submissions %v as %s: %v", ids, status, err)
 	}
 }
 

@@ -2,6 +2,8 @@ package hiredata
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,7 +85,7 @@ func TestLookupAPIKeyByHash_ExpiresAtPopulated(t *testing.T) {
 	}
 }
 
-func TestJobText_ReturnsTitleCompanyPrefixedStrippedDescription(t *testing.T) {
+func TestJobChunks_ReturnsTitleCompanyPrefixedStrippedDescription(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
@@ -95,22 +97,54 @@ func TestJobText_ReturnsTitleCompanyPrefixedStrippedDescription(t *testing.T) {
 		t.Fatalf("seed job: %v", err)
 	}
 
-	text, err := JobText(ctx, pool, jobID)
+	chunks, err := JobChunks(ctx, pool, jobID)
 	if err != nil {
-		t.Fatalf("JobText: %v", err)
+		t.Fatalf("JobChunks: %v", err)
 	}
-	want := "passage: Backend Engineer at Acme. Build great APIs."
-	if text != want {
-		t.Errorf("JobText = %q, want %q", text, want)
+	want := []string{"passage: Backend Engineer at Acme. Build great APIs."}
+	if !reflect.DeepEqual(chunks, want) {
+		t.Errorf("JobChunks = %q, want %q", chunks, want)
 	}
 }
 
-func TestJobText_UnknownJob_ReturnsError(t *testing.T) {
+func TestJobChunks_UnknownJob_ReturnsError(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
-	_, err := JobText(ctx, pool, 999999)
+	_, err := JobChunks(ctx, pool, 999999)
 	if err == nil {
 		t.Fatal("expected an error for an unknown job id")
+	}
+}
+
+// TestJobChunks_LongDescription_ReturnsMultipleChunks proves JobChunks
+// actually chunks a long description instead of returning the whole thing
+// as one passage — the fix for a real gap: a single-passage-per-job
+// service permanently lost every chunk past the first for long
+// descriptions, since nothing else ever revisits an already-stamped job.
+func TestJobChunks_LongDescription_ReturnsMultipleChunks(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	var paras []string
+	for i := 0; i < 40; i++ {
+		paras = append(paras, strings.Repeat("word ", 20)+"end of paragraph.")
+	}
+	description := strings.Join(paras, "\n")
+
+	var jobID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO jobs (public_slug, title, company, description)
+		VALUES ('acme-long-job', 'Engineer', 'Acme', $1) RETURNING id
+	`, description).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+
+	chunks, err := JobChunks(ctx, pool, jobID)
+	if err != nil {
+		t.Fatalf("JobChunks: %v", err)
+	}
+	if len(chunks) <= 1 {
+		t.Fatalf("len(chunks) = %d, want > 1 for a description well past the chunk budget", len(chunks))
 	}
 }

@@ -32,15 +32,21 @@ type Job struct {
 	// OutboxID must be round-tripped unchanged in the matching Submission —
 	// a job can have more than one outstanding row at once, and ID (the
 	// job itself) alone cannot say which one a submission resolves.
-	OutboxID int64  `json:"outbox_id"`
-	ID       int64  `json:"id"`
-	Text     string `json:"text"`
+	OutboxID int64 `json:"outbox_id"`
+	ID       int64 `json:"id"`
+	// ChunkIndex must also be round-tripped unchanged — a job needing more
+	// than one chunk (internal/jobtext) arrives as several Jobs sharing
+	// OutboxID/ID with distinct ChunkIndex values, each embedded and
+	// submitted independently.
+	ChunkIndex int    `json:"chunk_index"`
+	Text       string `json:"text"`
 }
 
 type Submission struct {
-	OutboxID int64     `json:"outbox_id"`
-	JobID    int64     `json:"job_id"`
-	Vector   []float64 `json:"vector"`
+	OutboxID   int64     `json:"outbox_id"`
+	JobID      int64     `json:"job_id"`
+	ChunkIndex int       `json:"chunk_index"`
+	Vector     []float64 `json:"vector"`
 }
 
 type Result struct {

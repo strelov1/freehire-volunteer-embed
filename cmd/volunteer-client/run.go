@@ -47,7 +47,7 @@ func runOnce(ctx context.Context, lease leaseFunc, embedBatch embedBatchFunc, su
 
 	submissions := make([]client.Submission, len(jobs))
 	for i, job := range jobs {
-		submissions[i] = client.Submission{OutboxID: job.OutboxID, JobID: job.ID, Vector: vectors[i]}
+		submissions[i] = client.Submission{OutboxID: job.OutboxID, JobID: job.ID, ChunkIndex: job.ChunkIndex, Vector: vectors[i]}
 	}
 
 	results, err := submit(ctx, submissions)

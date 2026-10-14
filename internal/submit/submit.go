@@ -1,7 +1,7 @@
 // Package submit accepts volunteer-computed embedding vectors and stages
 // them in volunteer_submissions for later verification. It never writes to
 // freehire's live job_semantic_chunks table — that happens only after
-// verification (see the promotion package, task group 8).
+// EVERY chunk of a job has been verified (see the promote package).
 package submit
 
 import (
@@ -24,10 +24,9 @@ import (
 
 const vectorDimension = 768
 
-// submitConcurrency bounds how many items from one batch stage (DB-only:
-// lease check, insert, job text lookup, reputation read) or finish
-// (DB-only: record outcome, promote) at once. Bounded, not unlimited, so
-// one huge batch can't flood the DB pool with every item at once.
+// submitConcurrency bounds how many job-groups from one batch stage or
+// finish at once. Bounded, not unlimited, so one huge batch can't flood
+// the DB pool with every group at once.
 const submitConcurrency = 8
 
 type Status int
@@ -42,10 +41,14 @@ const (
 	StatusError
 )
 
+// Item is one chunk of one job's submission — a job needing more than one
+// chunk (see internal/jobtext) arrives as several Items sharing the same
+// OutboxID/JobID with distinct ChunkIndex values.
 type Item struct {
-	OutboxID int64
-	JobID    int64
-	Vector   []float64
+	OutboxID   int64
+	JobID      int64
+	ChunkIndex int
+	Vector     []float64
 }
 
 type Result struct {
@@ -53,86 +56,119 @@ type Result struct {
 	Status Status
 }
 
-// pendingCheck is an item staged in volunteer_submissions whose reputation
-// says it needs an actual spot-check, carrying what finishing it later
-// needs: which row to finalize, the submitted vector to compare, and the
-// job text to re-embed.
-type pendingCheck struct {
+// stagedItem is one chunk that passed validation, lease-check, and its
+// own volunteer_submissions insert — everything needed to finalize it
+// once its job's whole-group outcome is known.
+type stagedItem struct {
+	chunkIndex   int
 	submissionID int64
-	item         Item
-	jobText      string
+	vector       []float64
 }
 
-// Submit processes each item independently: a rejection OR an
-// infrastructure error on one item never affects the others, and
-// submission never touches reputation (reputation only changes as a result
-// of spot-check verification, not at submission time — see
-// internal/reputation group 7). An accepted item is also spot-check
-// verified synchronously, before this call returns: there is no separate
-// background worker (see design.md).
+// pendingGroup is a job (one outbox row) whose complete, staged chunk set
+// needs an actual spot-check before this submit call can decide whether
+// to promote it. expectedTexts and trustedVectors are indexed by
+// chunk_index (0..len-1); submissionIDs/submittedVectors are built from
+// the staged items in the same index order.
+type pendingGroup struct {
+	outboxID       int64
+	jobID          int64
+	submissionIDs  []int64
+	submittedVecs  [][]float64
+	expectedTexts  []string
+	trustedVectors [][]float64
+}
+
+// Submit processes each job's chunk set as one all-or-nothing unit: a job
+// is promoted into job_semantic_chunks only once EVERY chunk it currently
+// expects (internal/jobtext's chunking, re-checked fresh at submission
+// time, not trusted from whatever the client claims) has been staged and
+// verified in this one call. A job submitted with a missing, extra, or
+// invalid chunk is left exactly as it was — nothing promoted, no
+// reputation impact — rather than silently promoting a partial chunk set,
+// which used to leave stale higher-index chunks from a prior, longer
+// embed behind forever (see freehire-ops' 2026-10-14 writeup).
 //
-// Every item selected for a check is re-embedded through the trusted TEI in
-// ONE shared request for the whole batch, not one request per item — this
-// is the fix for a real incident: with one TEI round trip per item, even
+// Every job selected for a check has its WHOLE batch's worth of pending
+// chunks re-embedded through the trusted TEI in ONE shared request, not
+// one request per chunk — this is the fix for a real incident: even
 // bounded per-item concurrency couldn't keep a single shared trusted TEI
-// ahead of several volunteers each submitting large batches at once, and
-// batches routinely blew the client's request timeout.
+// ahead of several volunteers each submitting large batches at once.
 //
-// Staging (lease check, insert, check-vs-skip decision) and finishing
-// (recording the outcome) each run with bounded concurrency
-// (submitConcurrency), not strictly in order. For items sharing a key, this
-// means the check-vs-skip decision (reputation.ShouldCheck) can read a
-// stale, pre-increment snapshot of that key's counters — a batch can sample
-// a slightly different set of items for checking than a fully sequential
-// run would have. The counters themselves do not lose updates under this:
-// each Record* call is one atomic SQL UPDATE, serialized by Postgres's own
-// row lock regardless of Go-level concurrency.
+// Staging and finishing each run with bounded concurrency
+// (submitConcurrency) across job-groups, not strictly in order. For
+// groups sharing a key, this means the check-vs-skip decision
+// (reputation.ShouldCheck) can read a stale, pre-increment snapshot of
+// that key's counters — a batch can sample a slightly different set of
+// jobs for checking than a fully sequential run would have. The counters
+// themselves do not lose updates under this: each Record* call is one
+// atomic SQL UPDATE, serialized by Postgres's own row lock regardless of
+// Go-level concurrency.
 func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
-	pendingSlots := make([]*pendingCheck, len(items))
 
+	var outboxOrder []int64
+	indicesByOutbox := map[int64][]int{}
+	for i, item := range items {
+		if _, seen := indicesByOutbox[item.OutboxID]; !seen {
+			outboxOrder = append(outboxOrder, item.OutboxID)
+		}
+		indicesByOutbox[item.OutboxID] = append(indicesByOutbox[item.OutboxID], i)
+	}
+
+	pendingSlots := make([]*pendingGroup, len(outboxOrder))
 	var stage errgroup.Group
 	stage.SetLimit(submitConcurrency)
-	for i, item := range items {
-		i, item := i, item
+	for gi, outboxID := range outboxOrder {
+		gi, outboxID := gi, outboxID
+		indices := indicesByOutbox[outboxID]
 		stage.Go(func() error {
-			status, pc := stageOne(ctx, pool, keyID, item, cfg)
-			results[i] = Result{JobID: item.JobID, Status: status}
-			pendingSlots[i] = pc
+			pendingSlots[gi] = stageGroup(ctx, pool, keyID, outboxID, indices, items, results, cfg)
 			return nil
 		})
 	}
-	_ = stage.Wait() // stageOne never returns an error; failure is a Status value
+	_ = stage.Wait() // stageGroup never returns an error; failure is a per-item Status value
 
-	var pending []pendingCheck
-	for _, pc := range pendingSlots {
-		if pc != nil {
-			pending = append(pending, *pc)
+	var pendingGroups []*pendingGroup
+	for _, pg := range pendingSlots {
+		if pg != nil {
+			pendingGroups = append(pendingGroups, pg)
 		}
 	}
-	if len(pending) == 0 {
+	if len(pendingGroups) == 0 {
 		return results
 	}
 
-	jobTexts := make([]string, len(pending))
-	for i, pc := range pending {
-		jobTexts[i] = pc.jobText
+	type chunkRef struct {
+		group *pendingGroup
+		pos   int
+	}
+	var jobTexts []string
+	var refs []chunkRef
+	for _, pg := range pendingGroups {
+		for pos, text := range pg.expectedTexts {
+			jobTexts = append(jobTexts, text)
+			refs = append(refs, chunkRef{group: pg, pos: pos})
+		}
 	}
 	trustedVectors, err := tei.EmbedBatch(ctx, teiURL, cfg.TrustedTEIAPIKey, jobTexts)
 	if err != nil {
 		// Trusted TEI unreachable or erroring for the whole batch: every
-		// pending item stays pending with no reputation change, exactly
+		// pending group stays pending with no reputation change, exactly
 		// like a single deferred check before this change — a later
 		// submission gets another chance.
 		return results
 	}
+	for i, ref := range refs {
+		ref.group.trustedVectors[ref.pos] = trustedVectors[i]
+	}
 
 	var finish errgroup.Group
 	finish.SetLimit(submitConcurrency)
-	for i, pc := range pending {
-		i, pc := i, pc
+	for _, pg := range pendingGroups {
+		pg := pg
 		finish.Go(func() error {
-			finishChecked(ctx, pool, keyID, pc, trustedVectors[i])
+			finishChecked(ctx, pool, keyID, pg)
 			return nil
 		})
 	}
@@ -141,12 +177,86 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 	return results
 }
 
-// stageOne validates item, confirms its lease, and stages it in
-// volunteer_submissions. If the key's reputation says this one should be
-// spot-checked, it returns a *pendingCheck for the batched TEI call;
-// otherwise it finishes the item immediately (trusted on track record, no
-// TEI call needed at all).
-func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, cfg config.Config) (Status, *pendingCheck) {
+// stageGroup validates and lease-checks every chunk belonging to one
+// outbox row, stages each valid one in volunteer_submissions, and then —
+// only if every chunk the job's CURRENT description actually expects was
+// staged, no more and no fewer — decides once whether this job's
+// submission needs a spot-check. A skip decision is finished immediately
+// (no TEI call needed at all); a check decision returns a *pendingGroup
+// for the batched TEI call. An incomplete or otherwise undecidable group
+// returns nil: every chunk that did stage is left "pending" for a later
+// pass, same as any other verification hiccup.
+func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, indices []int, items []Item, results []Result, cfg config.Config) *pendingGroup {
+	jobID := items[indices[0]].JobID
+	staged := map[int]stagedItem{} // by chunk_index
+
+	for _, idx := range indices {
+		item := items[idx]
+		status, si := stageOne(ctx, pool, keyID, item)
+		results[idx] = Result{JobID: item.JobID, Status: status}
+		if si != nil {
+			staged[item.ChunkIndex] = *si
+		}
+	}
+	if len(staged) == 0 {
+		return nil
+	}
+
+	expected, err := hiredata.JobChunks(ctx, pool, jobID)
+	if err != nil {
+		return nil // leave whatever staged for a later pass
+	}
+	if !matchesExpectedChunkSet(staged, len(expected)) {
+		// Missing, extra, or duplicate chunk indices relative to the job's
+		// CURRENT chunk set (its description may have changed since this
+		// batch was leased) — leave every staged row pending rather than
+		// promote a partial set.
+		return nil
+	}
+
+	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
+	if err != nil {
+		return nil
+	}
+
+	if !reputation.ShouldCheck(totalEvaluated, consecutivePasses, cfg) {
+		finishSkipped(ctx, pool, keyID, outboxID, jobID, staged)
+		return nil
+	}
+
+	pg := &pendingGroup{
+		outboxID:       outboxID,
+		jobID:          jobID,
+		submissionIDs:  make([]int64, len(expected)),
+		submittedVecs:  make([][]float64, len(expected)),
+		expectedTexts:  expected,
+		trustedVectors: make([][]float64, len(expected)),
+	}
+	for chunkIndex, si := range staged {
+		pg.submissionIDs[chunkIndex] = si.submissionID
+		pg.submittedVecs[chunkIndex] = si.vector
+	}
+	return pg
+}
+
+// matchesExpectedChunkSet reports whether staged's keys are exactly
+// {0, ..., expectedCount-1} — no gaps, no duplicates (impossible by
+// construction, staged is keyed by chunk_index), no out-of-range indices.
+func matchesExpectedChunkSet(staged map[int]stagedItem, expectedCount int) bool {
+	if len(staged) != expectedCount {
+		return false
+	}
+	for i := 0; i < expectedCount; i++ {
+		if _, ok := staged[i]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// stageOne validates one chunk and confirms its lease, then stages it in
+// volunteer_submissions.
+func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) (Status, *stagedItem) {
 	if !validVector(item.Vector) {
 		return StatusInvalidVector, nil
 	}
@@ -167,82 +277,90 @@ func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item, c
 
 	var submissionID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, status)
-		VALUES ($1, $2, $3, 'pending')
+		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, chunk_index, status)
+		VALUES ($1, $2, $3, $4, 'pending')
 		RETURNING id
-	`, item.JobID, keyID, pgvec.Format(item.Vector)).Scan(&submissionID); err != nil {
+	`, item.JobID, keyID, pgvec.Format(item.Vector), item.ChunkIndex).Scan(&submissionID); err != nil {
 		return StatusError, nil
 	}
 
-	// From here on, any failure leaves the row pending for a later pass
-	// rather than failing the request — a verification hiccup must not
-	// change what the volunteer's HTTP call saw.
-	jobText, err := hiredata.JobText(ctx, pool, item.JobID)
-	if err != nil {
-		return StatusAccepted, nil
-	}
-	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
-	if err != nil {
-		return StatusAccepted, nil
-	}
-
-	if !reputation.ShouldCheck(totalEvaluated, consecutivePasses, cfg) {
-		finishSkipped(ctx, pool, keyID, submissionID, item)
-		return StatusAccepted, nil
-	}
-
-	return StatusAccepted, &pendingCheck{submissionID: submissionID, item: item, jobText: jobText}
+	return StatusAccepted, &stagedItem{chunkIndex: item.ChunkIndex, submissionID: submissionID, vector: item.Vector}
 }
 
 // finishSkipped records a submission trusted on track record, with no TEI
-// call at all.
-func finishSkipped(ctx context.Context, pool *pgxpool.Pool, keyID, submissionID int64, item Item) {
+// call at all, and promotes the job's whole chunk set.
+func finishSkipped(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID, jobID int64, staged map[int]stagedItem) {
 	if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
-		log.Printf("submit: record skipped for key %d, submission %d: %v", keyID, submissionID, err)
+		log.Printf("submit: record skipped for key %d, job %d: %v", keyID, jobID, err)
 	}
-	if err := promote.Promote(ctx, pool, item.OutboxID, item.JobID, item.Vector); err != nil {
-		log.Printf("submit: promote job %d, submission %d: %v", item.JobID, submissionID, err)
+	if err := promote.Replace(ctx, pool, outboxID, jobID, chunkVectors(staged)); err != nil {
+		log.Printf("submit: promote job %d: %v", jobID, err)
 		return // do not finalize: nothing actually reached job_semantic_chunks
 	}
-	finalize(ctx, pool, keyID, submissionID, item.JobID, "verified")
+	finalizeGroup(ctx, pool, keyID, jobID, staged, "verified")
 }
 
-// finishChecked records the outcome of a submission that was re-embedded
-// through the trusted TEI as part of this batch's single shared call.
-func finishChecked(ctx context.Context, pool *pgxpool.Pool, keyID int64, pc pendingCheck, trustedVector []float64) {
-	if verify.Cosine(pc.item.Vector, trustedVector) >= verify.MatchThreshold {
-		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
-			log.Printf("submit: record passed for key %d, submission %d: %v", keyID, pc.submissionID, err)
+// finishChecked records the outcome of a job's chunk set that was
+// re-embedded through the trusted TEI as part of this batch's single
+// shared call. The whole job passes only if EVERY chunk matches; one
+// mismatched chunk rejects the whole submission, same as hire's own
+// completion has no notion of "half a job's chunks."
+func finishChecked(ctx context.Context, pool *pgxpool.Pool, keyID int64, pg *pendingGroup) {
+	allMatch := true
+	for i := range pg.expectedTexts {
+		if verify.Cosine(pg.submittedVecs[i], pg.trustedVectors[i]) < verify.MatchThreshold {
+			allMatch = false
+			break
 		}
-		if err := promote.Promote(ctx, pool, pc.item.OutboxID, pc.item.JobID, pc.item.Vector); err != nil {
-			log.Printf("submit: promote job %d, submission %d: %v", pc.item.JobID, pc.submissionID, err)
+	}
+
+	staged := make(map[int]stagedItem, len(pg.submissionIDs))
+	for i := range pg.submissionIDs {
+		staged[i] = stagedItem{chunkIndex: i, submissionID: pg.submissionIDs[i], vector: pg.submittedVecs[i]}
+	}
+
+	if allMatch {
+		if err := reputation.RecordPassed(ctx, pool, keyID); err != nil {
+			log.Printf("submit: record passed for key %d, job %d: %v", keyID, pg.jobID, err)
+		}
+		if err := promote.Replace(ctx, pool, pg.outboxID, pg.jobID, chunkVectors(staged)); err != nil {
+			log.Printf("submit: promote job %d: %v", pg.jobID, err)
 			return // do not finalize: nothing actually reached job_semantic_chunks
 		}
-		finalize(ctx, pool, keyID, pc.submissionID, pc.item.JobID, "verified")
+		finalizeGroup(ctx, pool, keyID, pg.jobID, staged, "verified")
 		return
 	}
 
 	justBanned, err := reputation.RecordFailed(ctx, pool, keyID)
 	if err != nil {
-		log.Printf("submit: record failed for key %d, submission %d: %v", keyID, pc.submissionID, err)
+		log.Printf("submit: record failed for key %d, job %d: %v", keyID, pg.jobID, err)
 	}
 	if justBanned {
-		log.Printf("AUDIT ban key=%d reason=3_consecutive_spot_check_failures last_submission=%d job=%d",
-			keyID, pc.submissionID, pc.item.JobID)
+		log.Printf("AUDIT ban key=%d reason=3_consecutive_spot_check_failures job=%d", keyID, pg.jobID)
 	}
-	if err := lease.Release(ctx, pool, pc.item.OutboxID, keyID); err != nil {
-		log.Printf("submit: release lease for outbox row %d (job %d), key %d: %v", pc.item.OutboxID, pc.item.JobID, keyID, err)
+	if err := lease.Release(ctx, pool, pg.outboxID, keyID); err != nil {
+		log.Printf("submit: release lease for outbox row %d (job %d), key %d: %v", pg.outboxID, pg.jobID, keyID, err)
 	}
-	finalize(ctx, pool, keyID, pc.submissionID, pc.item.JobID, "rejected")
+	finalizeGroup(ctx, pool, keyID, pg.jobID, staged, "rejected")
 }
 
-func finalize(ctx context.Context, pool *pgxpool.Pool, keyID, submissionID, jobID int64, status string) {
-	log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s", keyID, jobID, submissionID, status)
-	if _, err := pool.Exec(ctx,
-		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
-		status, submissionID,
-	); err != nil {
-		log.Printf("submit: finalize submission %d as %s: %v", submissionID, status, err)
+func chunkVectors(staged map[int]stagedItem) []promote.ChunkVector {
+	out := make([]promote.ChunkVector, 0, len(staged))
+	for chunkIndex, si := range staged {
+		out = append(out, promote.ChunkVector{ChunkIndex: chunkIndex, Vector: si.vector})
+	}
+	return out
+}
+
+func finalizeGroup(ctx context.Context, pool *pgxpool.Pool, keyID, jobID int64, staged map[int]stagedItem, status string) {
+	for _, si := range staged {
+		log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s", keyID, jobID, si.submissionID, status)
+		if _, err := pool.Exec(ctx,
+			`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
+			status, si.submissionID,
+		); err != nil {
+			log.Printf("submit: finalize submission %d as %s: %v", si.submissionID, status, err)
+		}
 	}
 }
 

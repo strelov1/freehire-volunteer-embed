@@ -38,19 +38,21 @@ func LookupAPIKeyByHash(ctx context.Context, pool *pgxpool.Pool, tokenHash strin
 	return key, true, nil
 }
 
-// JobText returns the exact text to embed for a job — the same
-// "passage: {title} at {company}. {description}" (HTML-stripped) text
-// hire's own cmd/embed would feed to TEI (see internal/jobtext), so this
-// is what's handed to volunteers to embed and what this service re-embeds
-// itself during spot-check verification.
-func JobText(ctx context.Context, pool *pgxpool.Pool, jobID int64) (string, error) {
+// JobChunks returns the exact texts to embed for a job — the same
+// "passage: {title} at {company}. {chunk}" (HTML-stripped, chunked) texts
+// hire's own cmd/embed would feed to TEI (see internal/jobtext), one per
+// chunk of the description, in order. This is what's handed to volunteers
+// to embed and what this service re-embeds itself during spot-check
+// verification. A description that strips to nothing returns a nil slice
+// with no error — a valid, final state (see jobtext.FormatChunksForEmbedding).
+func JobChunks(ctx context.Context, pool *pgxpool.Pool, jobID int64) ([]string, error) {
 	var title, company, description string
 	err := pool.QueryRow(ctx,
 		`SELECT title, company, description FROM jobs WHERE id = $1`,
 		jobID,
 	).Scan(&title, &company, &description)
 	if err != nil {
-		return "", fmt.Errorf("hiredata: job text for job %d: %w", jobID, err)
+		return nil, fmt.Errorf("hiredata: job chunks for job %d: %w", jobID, err)
 	}
-	return jobtext.FormatForEmbedding(title, company, description), nil
+	return jobtext.FormatChunksForEmbedding(title, company, description), nil
 }

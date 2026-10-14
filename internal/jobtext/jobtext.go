@@ -1,17 +1,10 @@
-// Package jobtext renders a job into the exact text freehire's own
+// Package jobtext renders a job into the exact text(s) freehire's own
 // cmd/embed feeds to TEI, so volunteer-computed embeddings are comparable
 // to the rest of production's search index — not just internally
-// self-consistent. Ported from internal/search/search/{plaintext,embed}.go
+// self-consistent. Ported from internal/search/search/{plaintext,embed,chunk}.go
 // in the hire repo; keep it byte-for-byte aligned with that source, since
-// any drift here means promoted vectors silently diverge from what
+// any drift here means a promoted chunk set silently diverges from what
 // cmd/embed would have produced for the same job.
-//
-// Known limitation (design.md Non-Goals): hire's real pipeline splits a
-// long description into multiple chunks (chunkText, 2000-rune budget) and
-// embeds each separately. This package renders the WHOLE stripped
-// description as one unit — correct for jobs that would only ever produce
-// a single chunk anyway (the common case), but not equivalent to
-// production for a description long enough to need more than one.
 package jobtext
 
 import (
@@ -41,10 +34,22 @@ func stripToPlainText(rawHTML string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-// FormatForEmbedding renders a job's title, company, and HTML description
-// into the "passage: {title} at {company}. {description}" text e5 expects
-// on the corpus side. title and company are used verbatim, matching
-// jobChunkPassages — only the description is HTML-stripped.
-func FormatForEmbedding(title, company, description string) string {
-	return "passage: " + title + " at " + company + ". " + stripToPlainText(description)
+// FormatChunksForEmbedding renders a job's title, company, and HTML
+// description into one or more "passage: {title} at {company}. {chunk}"
+// texts e5 expects on the corpus side — one per chunk of the HTML-stripped
+// description (see chunkText), matching hire's own jobChunkPassages
+// byte-for-byte: every chunk carries the same prefix, since each becomes
+// an independently-scored vector. A job whose description strips to
+// nothing yields no passages at all, not one passage of just the prefix.
+func FormatChunksForEmbedding(title, company, description string) []string {
+	chunks := chunkText(stripToPlainText(description))
+	if len(chunks) == 0 {
+		return nil
+	}
+	prefix := "passage: " + title + " at " + company + ". "
+	out := make([]string, len(chunks))
+	for i, c := range chunks {
+		out[i] = prefix + c
+	}
+	return out
 }

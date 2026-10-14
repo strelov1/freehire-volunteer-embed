@@ -6,11 +6,13 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
+	"github.com/strelov1/freehire-volunteer-embed/internal/jobtext"
 	"github.com/strelov1/freehire-volunteer-embed/internal/pgvec"
 	"github.com/strelov1/freehire-volunteer-embed/internal/reputation"
 	"github.com/strelov1/freehire-volunteer-embed/internal/testdb"
@@ -35,6 +37,18 @@ func fixtureVector() []float64 {
 	return v
 }
 
+// longDescription reliably chunks into more than one piece under
+// internal/jobtext's real chunking (see its own tests for the exact
+// split) — used by every multi-chunk test here so they exercise the real
+// algorithm instead of a hand-picked chunk count.
+func longDescription() string {
+	var paras []string
+	for i := 0; i < 40; i++ {
+		paras = append(paras, strings.Repeat("word ", 20)+"end of paragraph.")
+	}
+	return strings.Join(paras, "\n")
+}
+
 // teiServerEchoing stands in for the trusted TEI: Submit now sends every
 // pending-check item's job text in ONE request, so a fixture that always
 // returns a single hardcoded vector would make tei.EmbedBatch itself fail
@@ -55,10 +69,8 @@ func teiServerEchoing(vec []float64) *httptest.Server {
 	}))
 }
 
-// seedLeasedJob seeds a job with one semantic_outbox row and a matching
-// lease on it, returning both ids — submissions are identified by job_id,
-// but a lease (and the promote path's DELETE) is scoped to the specific
-// outbox row, since a job can have more than one outstanding row at once.
+// seedLeasedJob seeds a single-chunk job with one semantic_outbox row and
+// a matching lease on it, returning both ids.
 func seedLeasedJob(t *testing.T, pool *pgxpool.Pool, keyID int64, expiresAt time.Time) (jobID, outboxID int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -83,13 +95,41 @@ func seedLeasedJob(t *testing.T, pool *pgxpool.Pool, keyID int64, expiresAt time
 	return jobID, outboxID
 }
 
+// seedLeasedJobWithDescription is seedLeasedJob for a caller-chosen
+// description, returning the REAL chunk texts internal/jobtext would
+// compute for it — tests build their Items from these texts rather than
+// hardcoding an assumed chunk count.
+func seedLeasedJobWithDescription(t *testing.T, pool *pgxpool.Pool, keyID int64, expiresAt time.Time, description string) (jobID, outboxID int64, chunks []string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO jobs (public_slug, description) VALUES ($1, $2) RETURNING id`,
+		"submit-job-"+time.Now().Format("150405.000000000"), description,
+	).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`,
+		jobID,
+	).Scan(&outboxID); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO volunteer_leases (outbox_id, job_id, leased_by_key_id, expires_at) VALUES ($1, $2, $3, $4)`,
+		outboxID, jobID, keyID, expiresAt,
+	); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+	return jobID, outboxID, jobtext.FormatChunksForEmbedding("", "", description)
+}
+
 func TestSubmit_ActiveLeaseValidVector_Accepted(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 	const keyID = int64(1)
 	jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
 
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}
@@ -117,7 +157,7 @@ func TestSubmit_NoLeaseHeld_RejectedNotLeased(t *testing.T) {
 		t.Fatalf("seed job: %v", err)
 	}
 
-	results := Submit(ctx, pool, 1, []Item{{OutboxID: 999999, JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
+	results := Submit(ctx, pool, 1, []Item{{OutboxID: 999999, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -136,7 +176,7 @@ func TestSubmit_LeaseHeldByDifferentKey_RejectedNotLeased(t *testing.T) {
 	ctx := context.Background()
 	jobID, outboxID := seedLeasedJob(t, pool, 999, time.Now().Add(5*time.Minute))
 
-	results := Submit(ctx, pool, 1, []Item{{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
+	results := Submit(ctx, pool, 1, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -148,7 +188,7 @@ func TestSubmit_ExpiredLease_RejectedNotLeased(t *testing.T) {
 	const keyID = int64(1)
 	jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(-1*time.Minute))
 
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusNotLeased {
 		t.Errorf("Status = %v, want StatusNotLeased", results[0].Status)
 	}
@@ -160,7 +200,7 @@ func TestSubmit_WrongVectorLength_RejectedInvalidNoReputationImpact(t *testing.T
 	const keyID = int64(1)
 	jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
 
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: []float64{0.1, 0.2}}}, unreachableTEIURL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: []float64{0.1, 0.2}}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusInvalidVector {
 		t.Errorf("Status = %v, want StatusInvalidVector", results[0].Status)
 	}
@@ -183,7 +223,7 @@ func TestSubmit_NonFiniteVectorValue_RejectedInvalid(t *testing.T) {
 	badVector := fixtureVector()
 	badVector[10] = math.NaN()
 
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: badVector}}, unreachableTEIURL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: badVector}}, unreachableTEIURL, testCfg())
 	if results[0].Status != StatusInvalidVector {
 		t.Errorf("Status = %v, want StatusInvalidVector", results[0].Status)
 	}
@@ -203,8 +243,8 @@ func TestSubmit_MixedBatch_EachItemHandledIndependently(t *testing.T) {
 	}
 
 	results := Submit(ctx, pool, keyID, []Item{
-		{OutboxID: goodOutboxID, JobID: goodJobID, Vector: fixtureVector()},
-		{OutboxID: 999999, JobID: unleashedJobID, Vector: fixtureVector()},
+		{OutboxID: goodOutboxID, JobID: goodJobID, ChunkIndex: 0, Vector: fixtureVector()},
+		{OutboxID: 999999, JobID: unleashedJobID, ChunkIndex: 0, Vector: fixtureVector()},
 	}, unreachableTEIURL, testCfg())
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2", len(results))
@@ -245,7 +285,7 @@ func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T
 	server := teiServerEchoing(submitted) // trusted re-embedding matches exactly
 	defer server.Close()
 
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: submitted}}, server.URL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: submitted}}, server.URL, testCfg())
 	if results[0].Status != StatusAccepted {
 		t.Fatalf("Status = %v, want StatusAccepted", results[0].Status)
 	}
@@ -281,6 +321,14 @@ func TestSubmit_SynchronousVerification_MatchingVector_EndsVerified(t *testing.T
 	}
 	if outboxCount != 0 {
 		t.Errorf("semantic_outbox rows for job = %d, want 0 (promotion must clear the outbox entry)", outboxCount)
+	}
+
+	var model string
+	if err := pool.QueryRow(ctx, `SELECT semantic_embedded_model FROM jobs WHERE id = $1`, jobID).Scan(&model); err != nil {
+		t.Fatalf("querying jobs: %v", err)
+	}
+	if model != "e5" {
+		t.Errorf("semantic_embedded_model = %q, want %q (the completion stamp hire's own worker checks)", model, "e5")
 	}
 }
 
@@ -326,7 +374,7 @@ func TestSubmit_SynchronousVerification_SiblingOutboxRowForSameJob_IsUntouched(t
 
 	// Only submit for outboxID1 — outboxID2 is left as a still-outstanding,
 	// unverified claim, just like a slow-to-arrive second submission.
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID1, JobID: jobID, Vector: submitted}}, server.URL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID1, JobID: jobID, ChunkIndex: 0, Vector: submitted}}, server.URL, testCfg())
 	if results[0].Status != StatusAccepted {
 		t.Fatalf("Status = %v, want StatusAccepted", results[0].Status)
 	}
@@ -375,7 +423,7 @@ func TestSubmit_SynchronousVerification_MismatchedVector_EndsRejected(t *testing
 	server := teiServerEchoing(trusted)
 	defer server.Close()
 
-	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: submitted}}, server.URL, testCfg())
+	results := Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: submitted}}, server.URL, testCfg())
 	if results[0].Status != StatusAccepted {
 		t.Fatalf("Status = %v, want StatusAccepted", results[0].Status)
 	}
@@ -444,7 +492,7 @@ func TestSubmit_ThirdConsecutiveFailure_BansTheKey(t *testing.T) {
 	// and consecutive_passes=0, so the fix for "failure restores full
 	// checking" (consecutivePasses < FullCheckThreshold) guarantees this
 	// third submission is actually checked, not skipped.
-	Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()}}, server.URL, testCfg())
+	Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}}, server.URL, testCfg())
 
 	banned, err := reputation.IsBanned(ctx, pool, keyID)
 	if err != nil {
@@ -494,7 +542,7 @@ func TestSubmit_ManyItemsNeedingVerification_OneSharedTEICall(t *testing.T) {
 	items := make([]Item, itemCount)
 	for i := 0; i < itemCount; i++ {
 		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
-		items[i] = Item{OutboxID: outboxID, JobID: jobID, Vector: submitted}
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: submitted}
 	}
 
 	start := time.Now()
@@ -549,7 +597,7 @@ func TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates(t *test
 	items := make([]Item, itemCount)
 	for i := 0; i < itemCount; i++ {
 		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
-		items[i] = Item{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()}
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}
 	}
 
 	results := Submit(ctx, pool, keyID, items, unreachableTEIURL, testCfg())
@@ -578,8 +626,8 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	cancel() // simulates a transient infra failure (e.g. client disconnect, pool exhaustion)
 
 	results := Submit(ctx, pool, keyID, []Item{
-		{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()},
-		{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()},
+		{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()},
+		{OutboxID: outboxID, JobID: jobID, ChunkIndex: 1, Vector: fixtureVector()},
 	}, unreachableTEIURL, testCfg())
 
 	if len(results) != 2 {
@@ -592,6 +640,165 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	}
 }
 
+// TestSubmit_MultiChunkJob_AllVerified_PromotesEveryChunk is the core proof
+// of the actual fix: a job needing more than one chunk is promoted with
+// ALL of its chunks, and reputation is only touched ONCE for the whole
+// job, not once per chunk.
+func TestSubmit_MultiChunkJob_AllVerified_PromotesEveryChunk(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	jobID, outboxID, chunks := seedLeasedJobWithDescription(t, pool, keyID, time.Now().Add(5*time.Minute), longDescription())
+	if len(chunks) <= 1 {
+		t.Fatalf("len(chunks) = %d, want > 1 for this fixture's description", len(chunks))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			vectors[i] = fixtureVector() // matches whatever was submitted
+		}
+		_ = json.NewEncoder(w).Encode(vectors)
+	}))
+	defer server.Close()
+
+	items := make([]Item, len(chunks))
+	for i := range chunks {
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: i, Vector: fixtureVector()}
+	}
+
+	results := Submit(ctx, pool, keyID, items, server.URL, testCfg())
+	for i, r := range results {
+		if r.Status != StatusAccepted {
+			t.Errorf("results[%d].Status = %v, want StatusAccepted", i, r.Status)
+		}
+	}
+
+	var chunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM job_semantic_chunks WHERE job_id = $1`, jobID).Scan(&chunkCount); err != nil {
+		t.Fatalf("querying job_semantic_chunks: %v", err)
+	}
+	if chunkCount != len(chunks) {
+		t.Errorf("job_semantic_chunks rows = %d, want %d (every chunk must be promoted)", chunkCount, len(chunks))
+	}
+
+	var consecutivePasses int
+	if err := pool.QueryRow(ctx, `SELECT consecutive_passes FROM volunteer_reputation WHERE key_id = $1`, keyID).Scan(&consecutivePasses); err != nil {
+		t.Fatalf("querying volunteer_reputation: %v", err)
+	}
+	if consecutivePasses != 1 {
+		t.Errorf("consecutive_passes = %d, want 1 (one reputation increment per JOB, not per chunk)", consecutivePasses)
+	}
+}
+
+// TestSubmit_MultiChunkJob_OneChunkMismatched_RejectsWholeJobNoPromote
+// proves the all-or-nothing contract: one bad chunk among several rejects
+// the whole job's submission, and nothing is promoted (not even the
+// chunks that matched).
+func TestSubmit_MultiChunkJob_OneChunkMismatched_RejectsWholeJobNoPromote(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	jobID, outboxID, chunks := seedLeasedJobWithDescription(t, pool, keyID, time.Now().Add(5*time.Minute), longDescription())
+	if len(chunks) <= 1 {
+		t.Fatalf("len(chunks) = %d, want > 1 for this fixture's description", len(chunks))
+	}
+
+	callIndex := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			if callIndex == 0 && i == 0 {
+				mismatched := make([]float64, 768)
+				mismatched[0] = 1 // orthogonal-ish to fixtureVector(): low cosine similarity
+				vectors[i] = mismatched
+			} else {
+				vectors[i] = fixtureVector()
+			}
+		}
+		callIndex++
+		_ = json.NewEncoder(w).Encode(vectors)
+	}))
+	defer server.Close()
+
+	items := make([]Item, len(chunks))
+	for i := range chunks {
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: i, Vector: fixtureVector()}
+	}
+
+	results := Submit(ctx, pool, keyID, items, server.URL, testCfg())
+	for i, r := range results {
+		if r.Status != StatusAccepted {
+			t.Errorf("results[%d].Status = %v, want StatusAccepted", i, r.Status)
+		}
+	}
+
+	var chunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM job_semantic_chunks WHERE job_id = $1`, jobID).Scan(&chunkCount); err != nil {
+		t.Fatalf("querying job_semantic_chunks: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Errorf("job_semantic_chunks rows = %d, want 0 (one mismatched chunk must block the whole job's promotion)", chunkCount)
+	}
+
+	var rejectedCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM volunteer_submissions WHERE job_id = $1 AND status = 'rejected'`, jobID).Scan(&rejectedCount); err != nil {
+		t.Fatalf("querying volunteer_submissions: %v", err)
+	}
+	if rejectedCount != len(chunks) {
+		t.Errorf("rejected submission rows = %d, want %d (every chunk in the job, not just the mismatched one)", rejectedCount, len(chunks))
+	}
+}
+
+// TestSubmit_MultiChunkJob_MissingAChunk_LeavesPendingNoPromote proves an
+// incomplete chunk set (fewer than the job's description currently
+// requires) is never promoted — promoting a partial set is exactly the
+// bug this whole change exists to fix.
+func TestSubmit_MultiChunkJob_MissingAChunk_LeavesPendingNoPromote(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	jobID, outboxID, chunks := seedLeasedJobWithDescription(t, pool, keyID, time.Now().Add(5*time.Minute), longDescription())
+	if len(chunks) <= 1 {
+		t.Fatalf("len(chunks) = %d, want > 1 for this fixture's description", len(chunks))
+	}
+
+	// Submit only the FIRST chunk, simulating a client that dropped the rest.
+	results := Submit(ctx, pool, keyID, []Item{
+		{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()},
+	}, unreachableTEIURL, testCfg())
+	if results[0].Status != StatusAccepted {
+		t.Fatalf("Status = %v, want StatusAccepted (the row still stages; it just never finalizes)", results[0].Status)
+	}
+
+	var chunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM job_semantic_chunks WHERE job_id = $1`, jobID).Scan(&chunkCount); err != nil {
+		t.Fatalf("querying job_semantic_chunks: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Errorf("job_semantic_chunks rows = %d, want 0 (an incomplete chunk set must never be promoted)", chunkCount)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM volunteer_submissions WHERE job_id = $1`, jobID).Scan(&status); err != nil {
+		t.Fatalf("querying volunteer_submissions: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("stored status = %q, want pending (left for a later, complete submission)", status)
+	}
+}
+
 // TestFinishChecked_PromoteFails_LeavesRowPending guards against a specific
 // regression caught in review: a Promote failure must not still finalize
 // the submission as "verified" — that would claim a vector reached
@@ -600,7 +807,7 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 //
 // It calls finishChecked directly (this test is in package submit) with a
 // vector whose dimension doesn't match job_semantic_chunks.embedding's
-// vector(768) column, forcing Promote's INSERT to fail. The "trusted"
+// vector(768) column, forcing Replace's INSERT to fail. The "trusted"
 // vector passed in is identical, so the cosine comparison still matches —
 // Submit's own public validVector gate would normally reject a
 // 768-length mismatch before this point, so this test deliberately
@@ -616,6 +823,12 @@ func TestFinishChecked_PromoteFails_LeavesRowPending(t *testing.T) {
 	).Scan(&jobID); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
+	var outboxID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`, jobID,
+	).Scan(&outboxID); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
 	// volunteer_submissions.embedding is ALSO vector(768), so this row's own
 	// placeholder must be a valid 768-length vector — the dimension
 	// mismatch this test exercises is specific to job_semantic_chunks,
@@ -624,16 +837,22 @@ func TestFinishChecked_PromoteFails_LeavesRowPending(t *testing.T) {
 	wrongDimensionVector := []float64{0.1, 0.2, 0.3}
 	var submissionID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, status)
-		VALUES ($1, $2, $3, 'pending')
+		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, chunk_index, status)
+		VALUES ($1, $2, $3, 0, 'pending')
 		RETURNING id
 	`, jobID, keyID, pgvec.Format(fixtureVector())).Scan(&submissionID); err != nil {
 		t.Fatalf("seed submission: %v", err)
 	}
 
-	item := Item{OutboxID: 1, JobID: jobID, Vector: wrongDimensionVector}
-	pc := pendingCheck{submissionID: submissionID, item: item}
-	finishChecked(ctx, pool, keyID, pc, wrongDimensionVector) // identical vectors -> cosine matches
+	pg := &pendingGroup{
+		outboxID:       outboxID,
+		jobID:          jobID,
+		submissionIDs:  []int64{submissionID},
+		submittedVecs:  [][]float64{wrongDimensionVector},
+		expectedTexts:  []string{"whatever text"},
+		trustedVectors: [][]float64{wrongDimensionVector}, // identical -> cosine matches
+	}
+	finishChecked(ctx, pool, keyID, pg)
 
 	var status string
 	if err := pool.QueryRow(ctx, `SELECT status FROM volunteer_submissions WHERE id = $1`, submissionID).Scan(&status); err != nil {

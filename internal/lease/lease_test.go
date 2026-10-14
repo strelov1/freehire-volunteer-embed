@@ -2,6 +2,7 @@ package lease
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,9 +49,152 @@ func TestClaim_PendingJob_IsClaimedWithText(t *testing.T) {
 	if claimed[0].JobID != jobID {
 		t.Errorf("JobID = %d, want %d", claimed[0].JobID, jobID)
 	}
+	if claimed[0].ChunkIndex != 0 {
+		t.Errorf("ChunkIndex = %d, want 0", claimed[0].ChunkIndex)
+	}
 	want := "passage: Backend Engineer at Acme. Build great APIs"
 	if claimed[0].Text != want {
 		t.Errorf("Text = %q, want %q", claimed[0].Text, want)
+	}
+}
+
+// TestClaim_LongDescription_ClaimsOneEntryPerChunk guards the actual fix:
+// a job whose description needs more than one chunk must hand out one
+// ClaimedJob per chunk (same OutboxID/JobID, increasing ChunkIndex) so a
+// volunteer embeds — and later submits — the FULL description, not just
+// its first ~2000 runes.
+func TestClaim_LongDescription_ClaimsOneEntryPerChunk(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	var paras []string
+	for i := 0; i < 40; i++ {
+		paras = append(paras, strings.Repeat("word ", 20)+"end of paragraph.")
+	}
+	description := strings.Join(paras, "\n")
+
+	var jobID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO jobs (public_slug, title, company, description)
+		VALUES ('acme-long-job', 'Engineer', 'Acme', $1) RETURNING id
+	`, description).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	var outboxID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`, jobID,
+	).Scan(&outboxID); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
+
+	claimed, err := Claim(ctx, pool, 1, 10, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(claimed) <= 1 {
+		t.Fatalf("len(claimed) = %d, want > 1 for a description well past the chunk budget", len(claimed))
+	}
+	for i, c := range claimed {
+		if c.OutboxID != outboxID {
+			t.Errorf("claimed[%d].OutboxID = %d, want %d (all chunks share the one outbox row)", i, c.OutboxID, outboxID)
+		}
+		if c.JobID != jobID {
+			t.Errorf("claimed[%d].JobID = %d, want %d", i, c.JobID, jobID)
+		}
+		if c.ChunkIndex != i {
+			t.Errorf("claimed[%d].ChunkIndex = %d, want %d", i, c.ChunkIndex, i)
+		}
+	}
+
+	// Still exactly ONE lease row for the one outbox row, not one per chunk.
+	var leaseCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM volunteer_leases WHERE outbox_id = $1`, outboxID).Scan(&leaseCount); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if leaseCount != 1 {
+		t.Errorf("volunteer_leases rows for outbox %d = %d, want 1 (one lease per outbox row, not per chunk)", outboxID, leaseCount)
+	}
+}
+
+// TestClaim_EmptyDescriptionJob_CompletesImmediatelyWithoutLeasing matches
+// hire's own "absent from the chunks map" outcome: a job with nothing to
+// embed is stamped and cleared from the queue right away, never handed to
+// a volunteer (there is nothing for them to compute).
+func TestClaim_EmptyDescriptionJob_CompletesImmediatelyWithoutLeasing(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	var jobID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO jobs (public_slug, title, company, description, content_hash)
+		VALUES ('acme-empty-job', 'Engineer', 'Acme', '', 'hash-1') RETURNING id
+	`).Scan(&jobID); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5')`, jobID,
+	); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
+
+	claimed, err := Claim(ctx, pool, 1, 10, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("len(claimed) = %d, want 0 (nothing to embed, completed immediately)", len(claimed))
+	}
+
+	var outboxCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM semantic_outbox WHERE job_id = $1`, jobID).Scan(&outboxCount); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if outboxCount != 0 {
+		t.Errorf("expected the outbox row to be cleared immediately, found %d", outboxCount)
+	}
+
+	var model string
+	if err := pool.QueryRow(ctx, `SELECT semantic_embedded_model FROM jobs WHERE id = $1`, jobID).Scan(&model); err != nil {
+		t.Fatalf("querying jobs: %v", err)
+	}
+	if model != "e5" {
+		t.Errorf("semantic_embedded_model = %q, want %q (stamped even with zero chunks)", model, "e5")
+	}
+}
+
+// TestClaim_MixedEmptyAndNonEmptyInSameBatch_NonEmptyStillClaimed guards a
+// regression caught in review: completing an empty-description job happens
+// OUTSIDE the claim transaction, in a loop that must not let a problem
+// with one such job take down the ALREADY-committed, legitimate claim for
+// every other job in the same batch.
+func TestClaim_MixedEmptyAndNonEmptyInSameBatch_NonEmptyStillClaimed(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+
+	emptyJobID := seedJob(t, pool, "mixed-empty-job", "")
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5')`, emptyJobID,
+	); err != nil {
+		t.Fatalf("seed empty job's outbox row: %v", err)
+	}
+
+	jobID := seedJob(t, pool, "mixed-nonempty-job", "desc")
+	var outboxID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO semantic_outbox (job_id, target_model) VALUES ($1, 'e5') RETURNING id`, jobID,
+	).Scan(&outboxID); err != nil {
+		t.Fatalf("seed non-empty job's outbox row: %v", err)
+	}
+
+	claimed, err := Claim(ctx, pool, 1, 10, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("len(claimed) = %d, want 1 (the non-empty job, regardless of the empty one's own completion)", len(claimed))
+	}
+	if claimed[0].JobID != jobID || claimed[0].OutboxID != outboxID {
+		t.Errorf("claimed[0] = %+v, want the non-empty job %d / outbox %d", claimed[0], jobID, outboxID)
 	}
 }
 

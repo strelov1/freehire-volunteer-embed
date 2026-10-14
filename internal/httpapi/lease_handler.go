@@ -20,9 +20,15 @@ type leaseJob struct {
 	// migration between two embedding model versions), so a volunteer must
 	// round-trip this value in its matching submission; ID (job_id) alone
 	// cannot disambiguate which row a submission resolves.
-	OutboxID int64  `json:"outbox_id"`
-	ID       int64  `json:"id"`
-	Text     string `json:"text"`
+	OutboxID int64 `json:"outbox_id"`
+	ID       int64 `json:"id"`
+	// ChunkIndex and Text identify and carry ONE chunk of this job's
+	// description — a job needing more than one chunk (internal/jobtext)
+	// appears as several leaseJob entries sharing OutboxID/ID with
+	// distinct ChunkIndex values, which must also be round-tripped in the
+	// matching submission.
+	ChunkIndex int    `json:"chunk_index"`
+	Text       string `json:"text"`
 }
 
 type leaseResponseBody struct {
@@ -56,7 +62,7 @@ func LeaseHandler(pool *pgxpool.Pool, cfg config.Config) http.Handler {
 
 		jobs := make([]leaseJob, len(claimed))
 		for i, c := range claimed {
-			jobs[i] = leaseJob{OutboxID: c.OutboxID, ID: c.JobID, Text: c.Text}
+			jobs[i] = leaseJob{OutboxID: c.OutboxID, ID: c.JobID, ChunkIndex: c.ChunkIndex, Text: c.Text}
 		}
 		log.Printf("AUDIT lease key=%d count=%d", keyID, len(jobs))
 

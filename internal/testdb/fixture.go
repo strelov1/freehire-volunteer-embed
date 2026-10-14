@@ -41,7 +41,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     public_slug text NOT NULL UNIQUE,
     title text NOT NULL DEFAULT '',
     company text NOT NULL DEFAULT '',
-    description text NOT NULL DEFAULT ''
+    description text NOT NULL DEFAULT '',
+    content_hash text,
+    semantic_embedded_model text,
+    semantic_embedded_hash text,
+    similar_computed_at timestamptz
 );
 
 CREATE TABLE IF NOT EXISTS semantic_outbox (

@@ -12,36 +12,77 @@ import (
 	"github.com/strelov1/freehire-volunteer-embed/internal/pgvec"
 )
 
-// chunkIndex is always 0: this service's lease/submit protocol carries one
-// text and one vector per job, never multiple chunks (design.md Non-Goals).
-const chunkIndex = 0
+// ChunkVector is one verified chunk's index and embedding, ready to write.
+type ChunkVector struct {
+	ChunkIndex int
+	Vector     []float64
+}
 
-// Promote writes vec as job_id's chunk 0 and clears the SPECIFIC
-// semantic_outbox row (outboxID) this submission came from, in one
-// transaction. It is idempotent: a job already promoted is left untouched
-// (its first promotion wins) rather than overwritten by a later, possibly
-// stale, re-submission — a destructive overwrite here would silently
-// corrupt freehire's live search index (design.md Context).
+// Replace atomically replaces jobID's ENTIRE job_semantic_chunks set,
+// stamps its embed provenance (model + its current content_hash), clears
+// its similar-jobs staleness marker, and clears the SPECIFIC
+// semantic_outbox row this completion came from — mirrors hire's own
+// cmd/embed completion (DeleteJobSemanticChunks + InsertJobSemanticChunks +
+// StampSemanticEmbeddedBatch + ClearSimilarComputedAtBatch, all one
+// transaction, see internal/ai/embed.Store.CompleteOpen in the hire repo).
 //
-// The outbox clear is scoped to outboxID, not every row for jobID: a job
-// can have more than one outstanding semantic_outbox row at once (e.g. mid
-// migration between two embedding model versions, one row per
-// target_model), and clearing all of them because ONE got promoted would
-// silently abandon the other's still-unverified submission — a real
-// incident this service hit on 2026-10-13 (see freehire-ops' writeup).
-func Promote(ctx context.Context, pool *pgxpool.Pool, outboxID, jobID int64, vec []float64) error {
+// chunks may be empty — a description that strips to nothing is hire's own
+// "absent from the chunks map" outcome, a valid final state (zero chunks),
+// not an error. Stamping it anyway is what stops it from being
+// re-enqueued forever as "not yet embedded".
+//
+// Unlike the old chunk_index=0-only, ON CONFLICT DO NOTHING version this
+// replaces: calling Replace again for the same job with a DIFFERENT chunk
+// set (a legitimate re-embed after a content edit) now actually replaces —
+// a partial single-chunk write used to leave stale higher-index chunks
+// from a PRIOR, longer embed behind forever, since nothing ever deleted
+// them (see freehire-ops' 2026-10-14 writeup). A race between two
+// concurrent Replace calls for the SAME job (distinct outbox rows, e.g.
+// mid model migration) is not specially guarded against here — a
+// duplicate-key error on the losing call's INSERT just leaves its row
+// pending for a later pass, the same graceful-degradation shape every
+// other promotion failure already has.
+//
+// model comes from the outbox row itself (semantic_outbox.target_model),
+// read inside this same transaction, not threaded through the wire
+// protocol — the server already has it the moment it has outboxID.
+func Replace(ctx context.Context, pool *pgxpool.Pool, outboxID, jobID int64, chunks []ChunkVector) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("promote: begin: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	var model string
+	if err := tx.QueryRow(ctx,
+		`SELECT target_model FROM semantic_outbox WHERE id = $1`, outboxID,
+	).Scan(&model); err != nil {
+		return fmt.Errorf("promote: read target_model for outbox row %d: %w", outboxID, err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM job_semantic_chunks WHERE job_id = $1`, jobID,
+	); err != nil {
+		return fmt.Errorf("promote: clear existing chunks for job %d: %w", jobID, err)
+	}
+
+	for _, c := range chunks {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO job_semantic_chunks (job_id, chunk_index, embedding)
+			VALUES ($1, $2, $3)
+		`, jobID, c.ChunkIndex, pgvec.Format(c.Vector)); err != nil {
+			return fmt.Errorf("promote: insert chunk %d for job %d: %w", c.ChunkIndex, jobID, err)
+		}
+	}
+
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO job_semantic_chunks (job_id, chunk_index, embedding)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (job_id, chunk_index) DO NOTHING
-	`, jobID, chunkIndex, pgvec.Format(vec)); err != nil {
-		return fmt.Errorf("promote: insert chunk for job %d: %w", jobID, err)
+		UPDATE jobs
+		SET semantic_embedded_model = $1,
+		    semantic_embedded_hash  = content_hash,
+		    similar_computed_at     = NULL
+		WHERE id = $2
+	`, model, jobID); err != nil {
+		return fmt.Errorf("promote: stamp job %d: %w", jobID, err)
 	}
 
 	if _, err := tx.Exec(ctx,

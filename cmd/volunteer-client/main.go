@@ -45,7 +45,7 @@ func main() {
 		chunkSizeDescription = fmt.Sprintf("%d (fixed)", cfg.LocalEmbedChunkSize)
 	} else {
 		sizer := newAdaptiveChunkSize(adaptiveSeedChunkSize, adaptiveMinChunkSize, cfg.LocalEmbedChunkSizeMax)
-		embedBatch = adaptiveEmbedBatch(rawEmbedBatch, sizer, time.Now)
+		embedBatch = adaptiveEmbedBatch(rawEmbedBatch, sizer, time.Now, availableMemoryFraction)
 		chunkSizeDescription = fmt.Sprintf("auto (seed %d, max %d)", adaptiveSeedChunkSize, cfg.LocalEmbedChunkSizeMax)
 	}
 

@@ -83,6 +83,63 @@ func TestAdaptiveChunkSize_AbsoluteLatencyCeiling_ShrinksEvenIfBaselineDriftedUp
 	}
 }
 
+// TestAdaptiveChunkSize_LowMemory_ShrinksEvenThoughLatencyLooksFine guards
+// the real incident: an OOM kill gives no slow-call warning at all, since
+// the process simply disappears before any latency-based signal can react.
+// recordMemory is an independent, non-latency signal fed in from the real
+// OS, and it must act even when every recent call has been fast.
+func TestAdaptiveChunkSize_LowMemory_ShrinksEvenThoughLatencyLooksFine(t *testing.T) {
+	a := newAdaptiveChunkSize(50, 1, 1000)
+	a.recordSuccess(50, 10*time.Millisecond) // establishes a fast, healthy baseline
+
+	a.recordMemory(0.05) // 5% available: critically low
+
+	if a.size() >= 50 {
+		t.Errorf("size() = %d, want shrunk below seed 50 under critically low available memory", a.size())
+	}
+}
+
+// TestAdaptiveChunkSize_ComfortableMemory_DoesNotShrink guards against the
+// opposite mistake: this signal must not misfire under ordinary memory
+// pressure that isn't actually a problem.
+func TestAdaptiveChunkSize_ComfortableMemory_DoesNotShrink(t *testing.T) {
+	a := newAdaptiveChunkSize(50, 1, 1000)
+	a.recordMemory(0.6) // 60% available: plenty
+
+	if a.size() != 50 {
+		t.Errorf("size() = %d, want unchanged 50 under comfortable available memory", a.size())
+	}
+}
+
+// TestAdaptiveChunkSize_LowButNotCriticalMemory_HoldsInsteadOfGrowing
+// guards the middle zone: memory isn't in immediate danger, but there also
+// isn't comfortable headroom to keep growing into. A fast, healthy call in
+// this zone should hold the current size rather than grow further.
+func TestAdaptiveChunkSize_LowButNotCriticalMemory_HoldsInsteadOfGrowing(t *testing.T) {
+	a := newAdaptiveChunkSize(50, 1, 1000)
+	a.recordSuccess(50, 10*time.Millisecond) // establishes baseline
+	a.recordMemory(0.20)                     // below the comfortable threshold, above the critical one
+
+	a.recordSuccess(50, 10*time.Millisecond) // same healthy pace as before
+
+	if a.size() != 50 {
+		t.Errorf("size() = %d, want held at 50 (not grown) while memory headroom is tight but not critical", a.size())
+	}
+}
+
+// TestAdaptiveChunkSize_UnknownMemory_FallsBackToLatencyOnly guards
+// platforms/errors where the memory probe can't report anything: growth
+// must not get stuck forever just because this signal is unavailable.
+func TestAdaptiveChunkSize_UnknownMemory_FallsBackToLatencyOnly(t *testing.T) {
+	a := newAdaptiveChunkSize(5, 1, 1000)
+	a.recordSuccess(5, 100*time.Millisecond) // baseline, no recordMemory call at all
+
+	a.recordSuccess(5, 100*time.Millisecond) // same healthy pace
+	if a.size() <= 5 {
+		t.Errorf("size() = %d, want > 5 (growth) when no memory signal has ever been reported", a.size())
+	}
+}
+
 func TestAdaptiveChunkSize_NeverShrinksBelowMin(t *testing.T) {
 	a := newAdaptiveChunkSize(5, 3, 1000)
 

@@ -45,21 +45,40 @@ const adaptiveMinChunkSize = 1
 // This is a hard backstop, independent of wherever the baseline has drifted.
 const adaptiveAbsoluteLatencyCeiling = 2 * time.Second
 
+// lowMemoryShrinkFraction/lowMemoryHoldFraction gate growth on a second,
+// independent signal: available system memory, sampled directly from the
+// OS (see memstat_*.go). This exists because a sudden OOM kill gives no
+// slow-call warning the latency-based signal above could ever react to —
+// confirmed in practice, growth outran a volunteer's memory while every
+// individual call still looked fast right up to the moment the process
+// died. Below lowMemoryShrinkFraction, shrink immediately regardless of
+// latency. Between the two, hold the current size rather than grow
+// further. Above lowMemoryHoldFraction, this signal has nothing to add.
+const lowMemoryShrinkFraction = 0.10
+const lowMemoryHoldFraction = 0.25
+
+// unknownMemoryFraction is the zero-value sentinel meaning "no memory
+// sample has been reported yet" — distinct from any real fraction, which
+// is always in [0, 1]. Platforms where the OS probe fails fall back to
+// latency-only gating rather than being stuck unable to grow forever.
+const unknownMemoryFraction = -1
+
 // adaptiveChunkSize tracks how many texts the local embedder is currently
 // trusted to handle in one call, growing it while calls stay fast and
-// shrinking it at the first sign of trouble (an error, or a call that's
-// much slower per text than recent history) — the same pattern used to
-// avoid overwhelming a shared resource without knowing its exact capacity
-// up front.
+// shrinking it at the first sign of trouble (an error, a call that's much
+// slower per text than recent history, or low available system memory) —
+// the same pattern used to avoid overwhelming a shared resource without
+// knowing its exact capacity up front.
 type adaptiveChunkSize struct {
-	current  int
-	min      int
-	max      int
-	baseline time.Duration
+	current        int
+	min            int
+	max            int
+	baseline       time.Duration
+	memoryFraction float64
 }
 
 func newAdaptiveChunkSize(seed, min, max int) *adaptiveChunkSize {
-	return &adaptiveChunkSize{current: seed, min: min, max: max}
+	return &adaptiveChunkSize{current: seed, min: min, max: max, memoryFraction: unknownMemoryFraction}
 }
 
 func (a *adaptiveChunkSize) size() int {
@@ -90,12 +109,26 @@ func (a *adaptiveChunkSize) recordSuccess(textCount int, elapsed time.Duration) 
 		return
 	}
 
-	a.grow()
+	if a.memoryFraction == unknownMemoryFraction || a.memoryFraction >= lowMemoryHoldFraction {
+		a.grow()
+	}
 	a.baseline = time.Duration(float64(a.baseline)*(1-baselineWeight) + float64(perText)*baselineWeight)
 }
 
 func (a *adaptiveChunkSize) recordFailure() {
 	a.shrink()
+}
+
+// recordMemory reports the OS's current available-memory fraction,
+// independent of any call's latency. Below lowMemoryShrinkFraction this
+// shrinks immediately — the one signal in this whole mechanism that can
+// act before a slow call ever happens, which matters because an OOM kill
+// doesn't produce a slow call to react to; it just ends the process.
+func (a *adaptiveChunkSize) recordMemory(availableFraction float64) {
+	a.memoryFraction = availableFraction
+	if availableFraction < lowMemoryShrinkFraction {
+		a.shrink()
+	}
 }
 
 func (a *adaptiveChunkSize) grow() {
@@ -115,11 +148,19 @@ func (a *adaptiveChunkSize) shrink() {
 // whatever sizer currently trusts the local embedder with, feeding each
 // call's outcome back into sizer so later calls — within this batch, and
 // across every batch for the life of the process — keep adjusting. now is
-// injected so tests can control elapsed time deterministically.
-func adaptiveEmbedBatch(inner embedBatchFunc, sizer *adaptiveChunkSize, now func() time.Time) embedBatchFunc {
+// injected so tests can control elapsed time deterministically. memFraction
+// samples the OS's available-memory fraction directly (see memstat_*.go);
+// an error from it (unsupported platform, a transient read failure) just
+// means this call falls back to the latency-only signal, not a failure of
+// embedding itself.
+func adaptiveEmbedBatch(inner embedBatchFunc, sizer *adaptiveChunkSize, now func() time.Time, memFraction func() (float64, error)) embedBatchFunc {
 	return func(ctx context.Context, texts []string) ([][]float64, error) {
 		vectors := make([][]float64, 0, len(texts))
 		for start := 0; start < len(texts); {
+			if frac, err := memFraction(); err == nil {
+				sizer.recordMemory(frac)
+			}
+
 			end := min(start+sizer.size(), len(texts))
 			chunk := texts[start:end]
 

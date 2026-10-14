@@ -6,6 +6,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/microcosm-cc/bluemonday v1.0.27
 	golang.org/x/sync v0.21.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/time v0.16.0
 )
 

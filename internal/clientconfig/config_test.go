@@ -107,6 +107,44 @@ func TestLoad_LocalEmbedChunkSize_NotANumber_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestLoad_Defaults_LocalEmbedChunkSizeMax(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.LocalEmbedChunkSizeMax != 100 {
+		t.Errorf("expected default LocalEmbedChunkSizeMax 100, got %d", cfg.LocalEmbedChunkSizeMax)
+	}
+}
+
+func TestLoad_LocalEmbedChunkSizeMax_ParsesSetValue(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LOCAL_EMBED_CHUNK_SIZE_MAX", "16")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.LocalEmbedChunkSizeMax != 16 {
+		t.Errorf("expected LocalEmbedChunkSizeMax 16, got %d", cfg.LocalEmbedChunkSizeMax)
+	}
+}
+
+func TestLoad_LocalEmbedChunkSizeMax_NotPositive_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LOCAL_EMBED_CHUNK_SIZE_MAX", "0")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for LOCAL_EMBED_CHUNK_SIZE_MAX=0, got nil")
+	}
+}
+
 func TestLoad_LocalEmbedChunkSize_Negative_ReturnsError(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("LOCAL_EMBED_CHUNK_SIZE", "-1")

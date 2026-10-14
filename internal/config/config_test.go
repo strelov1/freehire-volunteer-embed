@@ -112,6 +112,34 @@ func TestLoad_OptionalVarsDefaultWhenUnset(t *testing.T) {
 	if cfg.MaxLeaseBatchSize != 50 {
 		t.Errorf("MaxLeaseBatchSize default = %d, want 50", cfg.MaxLeaseBatchSize)
 	}
+	if cfg.MaxDBConns != 32 {
+		t.Errorf("MaxDBConns default = %d, want 32", cfg.MaxDBConns)
+	}
+}
+
+func TestLoad_MaxDBConnsOverride(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DB_MAX_CONNS", "8")
+
+	cfg, err := Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MaxDBConns != 8 {
+		t.Errorf("MaxDBConns = %d, want 8", cfg.MaxDBConns)
+	}
+}
+
+func TestLoad_ZeroMaxDBConns_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DB_MAX_CONNS", "0")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for DB_MAX_CONNS=0, got nil (a zero-size pool could never serve a request)")
+	}
 }
 
 func TestLoad_OptionalVarsOverrideWhenSet(t *testing.T) {

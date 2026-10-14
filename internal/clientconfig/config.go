@@ -10,13 +10,14 @@ import (
 )
 
 type Config struct {
-	ServerURL           string
-	APIKey              string
-	LocalTEIURL         string
-	LocalTEIAPIKey      string
-	BatchSize           int
-	LocalEmbedChunkSize int
-	PollInterval        time.Duration
+	ServerURL              string
+	APIKey                 string
+	LocalTEIURL            string
+	LocalTEIAPIKey         string
+	BatchSize              int
+	LocalEmbedChunkSize    int
+	LocalEmbedChunkSizeMax int
+	PollInterval           time.Duration
 }
 
 func Load() (Config, error) {
@@ -71,13 +72,38 @@ func Load() (Config, error) {
 		localEmbedChunkSize = n
 	}
 
+	// A volunteer's real safe ceiling depends on their own hardware and is
+	// unknowable in advance; 100 is a conservative starting point, not a
+	// measured safe value for every machine — a machine that still can't
+	// hold this much in memory at once should lower it explicitly.
+	localEmbedChunkSizeMax, err := intEnvOrDefault("LOCAL_EMBED_CHUNK_SIZE_MAX", 100)
+	if err != nil {
+		return Config{}, err
+	}
+	if localEmbedChunkSizeMax <= 0 {
+		return Config{}, fmt.Errorf("clientconfig: LOCAL_EMBED_CHUNK_SIZE_MAX must be positive, got %d", localEmbedChunkSizeMax)
+	}
+
 	return Config{
-		ServerURL:           serverURL,
-		APIKey:              apiKey,
-		LocalTEIURL:         localTEIURL,
-		LocalTEIAPIKey:      os.Getenv("LOCAL_TEI_API_KEY"),
-		BatchSize:           batchSize,
-		LocalEmbedChunkSize: localEmbedChunkSize,
-		PollInterval:        pollInterval,
+		ServerURL:              serverURL,
+		APIKey:                 apiKey,
+		LocalTEIURL:            localTEIURL,
+		LocalTEIAPIKey:         os.Getenv("LOCAL_TEI_API_KEY"),
+		BatchSize:              batchSize,
+		LocalEmbedChunkSize:    localEmbedChunkSize,
+		LocalEmbedChunkSizeMax: localEmbedChunkSizeMax,
+		PollInterval:           pollInterval,
 	}, nil
+}
+
+func intEnvOrDefault(name string, fallback int) (int, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("clientconfig: %s invalid: %w", name, err)
+	}
+	return n, nil
 }

@@ -32,7 +32,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	pool, err := db.Open(ctx, cfg.DatabaseURL, cfg.MaxDBConns)
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}

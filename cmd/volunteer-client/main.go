@@ -44,9 +44,9 @@ func main() {
 		embedBatch = chunkedEmbedBatch(rawEmbedBatch, cfg.LocalEmbedChunkSize)
 		chunkSizeDescription = fmt.Sprintf("%d (fixed)", cfg.LocalEmbedChunkSize)
 	} else {
-		sizer := newAdaptiveChunkSize(adaptiveSeedChunkSize, adaptiveMinChunkSize, adaptiveMaxChunkSize)
+		sizer := newAdaptiveChunkSize(adaptiveSeedChunkSize, adaptiveMinChunkSize, cfg.LocalEmbedChunkSizeMax)
 		embedBatch = adaptiveEmbedBatch(rawEmbedBatch, sizer, time.Now)
-		chunkSizeDescription = fmt.Sprintf("auto (seed %d)", adaptiveSeedChunkSize)
+		chunkSizeDescription = fmt.Sprintf("auto (seed %d, max %d)", adaptiveSeedChunkSize, cfg.LocalEmbedChunkSizeMax)
 	}
 
 	submit := func(ctx context.Context, submissions []client.Submission) ([]client.Result, error) {

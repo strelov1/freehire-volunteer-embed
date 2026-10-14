@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
@@ -68,7 +70,10 @@ func SubmitHandler(pool *pgxpool.Pool, cfg config.Config) http.Handler {
 			items[i] = submit.Item{OutboxID: s.OutboxID, JobID: s.JobID, Vector: s.Vector}
 		}
 
+		start := time.Now()
 		results := submit.Submit(r.Context(), pool, keyID, items, cfg.TrustedTEIURL, cfg)
+		log.Printf("submit: key=%d items=%d body_bytes=%d elapsed=%s",
+			keyID, len(items), r.ContentLength, time.Since(start))
 
 		resp := submitResponseBody{Results: make([]submitResultItem, len(results))}
 		for i, r := range results {

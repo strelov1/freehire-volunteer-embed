@@ -21,6 +21,7 @@ type Config struct {
 	CheckDivisorStage1 int
 	CheckDivisorStage2 int
 	MaxLeaseBatchSize  int
+	MaxDBConns         int32
 }
 
 func Load() (Config, error) {
@@ -67,6 +68,19 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: LEASE_BATCH_SIZE_MAX must be positive, got %d", maxLeaseBatchSize)
 	}
 
+	// 32 gives headroom for several concurrent /v1/embed-tasks/submit
+	// requests from different volunteers, each fanning out
+	// submit.submitConcurrency (8) goroutines of its own — a single
+	// request's own fan-out must never be able to exhaust the whole pool
+	// by itself.
+	maxDBConns, err := intEnvOrDefault("DB_MAX_CONNS", 32)
+	if err != nil {
+		return Config{}, err
+	}
+	if maxDBConns <= 0 {
+		return Config{}, fmt.Errorf("config: DB_MAX_CONNS must be positive, got %d", maxDBConns)
+	}
+
 	return Config{
 		DatabaseURL:        databaseURL,
 		TrustedTEIURL:      trustedTEIURL,
@@ -77,6 +91,7 @@ func Load() (Config, error) {
 		CheckDivisorStage1: checkDivisorStage1,
 		CheckDivisorStage2: checkDivisorStage2,
 		MaxLeaseBatchSize:  maxLeaseBatchSize,
+		MaxDBConns:         int32(maxDBConns),
 	}, nil
 }
 

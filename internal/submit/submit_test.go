@@ -443,6 +443,105 @@ func TestSubmit_ThirdConsecutiveFailure_BansTheKey(t *testing.T) {
 	}
 }
 
+// TestSubmit_ManyItemsNeedingVerification_RunConcurrentlyNotSequentially
+// guards the fix for a real production bottleneck: a key still in its
+// full-check window (every item re-embedded through the trusted TEI) took
+// roughly 1s per item processed strictly one at a time, so any batch above
+// ~25-30 items blew past the volunteer client's own 30s request timeout —
+// independent of server load from other volunteers. A slow-but-healthy TEI
+// stand-in here (50ms/call) proves items run concurrently: sequential would
+// take itemCount*50ms; bounded concurrency should finish in a small
+// multiple of that, not a sum of all of it.
+func TestSubmit_ManyItemsNeedingVerification_RunConcurrentlyNotSequentially(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+	const itemCount = 20
+	const perCallDelay = 50 * time.Millisecond
+
+	submitted := fixtureVector()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(perCallDelay)
+		_ = json.NewEncoder(w).Encode([][]float64{submitted})
+	}))
+	defer server.Close()
+
+	items := make([]Item, itemCount)
+	for i := 0; i < itemCount; i++ {
+		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, Vector: submitted}
+	}
+
+	start := time.Now()
+	results := Submit(ctx, pool, keyID, items, server.URL, testCfg())
+	elapsed := time.Since(start)
+
+	for i, r := range results {
+		if r.Status != StatusAccepted {
+			t.Errorf("results[%d].Status = %v, want StatusAccepted", i, r.Status)
+		}
+	}
+
+	sequentialFloor := itemCount * perCallDelay
+	if elapsed >= sequentialFloor {
+		t.Errorf("Submit of %d items took %s, want well under the fully-sequential floor of %s — items are not running concurrently",
+			itemCount, elapsed, sequentialFloor)
+	}
+}
+
+// TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates guards
+// against the obvious risk of making Submit concurrent: multiple goroutines
+// incrementing the same key's reputation row must not lose updates to a
+// naive, non-atomic read-modify-write race. Each Record* call is already a
+// single atomic SQL UPDATE, so Postgres's row lock should serialize these
+// correctly regardless of Go-level concurrency — this proves it.
+func TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+	const itemCount = 20
+
+	// Both total_evaluated and consecutive_passes must individually clear
+	// FullCheckThreshold (20) before the divisor rule applies at all, and
+	// divisor=30 once consecutive_passes clears 2*threshold. total_evaluated
+	// climbs by exactly itemCount over this test (no lost updates is what
+	// it's proving), so the whole climbed range -- seed..seed+itemCount --
+	// must avoid any multiple of 30: if a goroutine's read landed on one,
+	// that item would decide it needs an actual check, hit the deliberately
+	// unreachable TEI, and defer without incrementing anything, which looks
+	// identical to a lost update but isn't one. 31..51 contains no multiple
+	// of 30.
+	const seedTotalEvaluated = 31
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO volunteer_reputation (key_id, total_evaluated, consecutive_passes)
+		VALUES ($1, $2, 100)
+	`, keyID, seedTotalEvaluated); err != nil {
+		t.Fatalf("seed reputation: %v", err)
+	}
+
+	items := make([]Item, itemCount)
+	for i := 0; i < itemCount; i++ {
+		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, Vector: fixtureVector()}
+	}
+
+	results := Submit(ctx, pool, keyID, items, unreachableTEIURL, testCfg())
+	for i, r := range results {
+		if r.Status != StatusAccepted {
+			t.Errorf("results[%d].Status = %v, want StatusAccepted", i, r.Status)
+		}
+	}
+
+	var totalEvaluated int
+	if err := pool.QueryRow(ctx, `SELECT total_evaluated FROM volunteer_reputation WHERE key_id = $1`, keyID).Scan(&totalEvaluated); err != nil {
+		t.Fatalf("querying volunteer_reputation: %v", err)
+	}
+	if want := seedTotalEvaluated + itemCount; totalEvaluated != want {
+		t.Errorf("total_evaluated = %d, want %d (every one of %d concurrent items must still land its own +1, with none lost)",
+			totalEvaluated, want, itemCount)
+	}
+}
+
 func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	pool := testdb.Setup(t)
 	const keyID = int64(1)

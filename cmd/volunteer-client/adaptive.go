@@ -28,12 +28,14 @@ const baselineWeight = 0.3
 // volunteer's local embedder is unknown hardware the first time it runs,
 // so the client starts conservatively and earns a bigger chunk size by
 // proving it's fast, rather than risking the thrash a large first call
-// caused in practice. adaptiveMaxChunkSize is a generous backstop; the
-// real ceiling on a single call is however many texts were leased
-// (BATCH_SIZE) in the first place.
+// caused in practice. The ceiling is LocalEmbedChunkSizeMax (clientconfig),
+// not a constant here — unlike latency, a sudden OOM kill of the local
+// embedder gives no slow-call warning to react to (confirmed in practice:
+// growth outran one volunteer's memory before any error or latency spike
+// could trip grow()'s single-call backoff), so the ceiling itself has to be
+// something a volunteer can pin to their own machine's real limit.
 const adaptiveSeedChunkSize = 5
 const adaptiveMinChunkSize = 1
-const adaptiveMaxChunkSize = 2000
 
 // adaptiveAbsoluteLatencyCeiling catches sustained multi-step latency drift
 // that a baseline-relative comparison alone would miss: if each call is

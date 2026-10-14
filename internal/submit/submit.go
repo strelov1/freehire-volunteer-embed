@@ -10,6 +10,8 @@ import (
 	"math"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/strelov1/freehire-volunteer-embed/internal/config"
 	"github.com/strelov1/freehire-volunteer-embed/internal/hiredata"
 	"github.com/strelov1/freehire-volunteer-embed/internal/lease"
@@ -20,6 +22,15 @@ import (
 )
 
 const vectorDimension = 768
+
+// submitConcurrency bounds how many items from one batch are processed at
+// once. Each spot-checked item makes its own round trip to the trusted TEI
+// (~1s observed in production), and that used to run one item at a time —
+// any batch above ~25-30 items checked at that rate alone exceeded the
+// volunteer client's 30s request timeout. Bounded, not unlimited, so one
+// huge batch can't flood the trusted TEI or the DB pool with every item at
+// once.
+const submitConcurrency = 8
 
 type Status int
 
@@ -50,11 +61,29 @@ type Result struct {
 // verification, not at submission time — see internal/reputation group 7).
 // An accepted item is also spot-check verified synchronously, before this
 // call returns: there is no separate background worker (see design.md).
+//
+// Items run with bounded concurrency (submitConcurrency), not strictly in
+// order. For items sharing a key, this means the check-rate decision
+// (reputation.ShouldCheck) can read a stale, pre-increment snapshot of that
+// key's counters — a batch can sample a slightly different set of items for
+// checking than a fully sequential run would have. The counters themselves
+// do not lose updates under this: each Record* call is one atomic SQL
+// UPDATE, serialized by Postgres's own row lock regardless of Go-level
+// concurrency.
 func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
+
+	var g errgroup.Group
+	g.SetLimit(submitConcurrency)
 	for i, item := range items {
-		results[i] = Result{JobID: item.JobID, Status: submitOne(ctx, pool, keyID, item, teiURL, cfg)}
+		i, item := i, item
+		g.Go(func() error {
+			results[i] = Result{JobID: item.JobID, Status: submitOne(ctx, pool, keyID, item, teiURL, cfg)}
+			return nil
+		})
 	}
+	_ = g.Wait() // submitOne never returns an error; failure is a Status value
+
 	return results
 }
 

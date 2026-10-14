@@ -108,9 +108,21 @@ SERVER_URL="https://freehire.me" \
 API_KEY="<your fhk_ key>" \
 LOCAL_TEI_URL="http://127.0.0.1:8080/embed" \
 BATCH_SIZE=5 \
+LOCAL_EMBED_CHUNK_SIZE=5 \
 POLL_INTERVAL=10s \
 ./volunteer-client-darwin-arm64   # use the binary name matching your OS
 ```
+
+`BATCH_SIZE` is how many jobs the client pulls from the server per round trip —
+raising it reduces network overhead. `LOCAL_EMBED_CHUNK_SIZE` is a separate
+knob: the most texts the client will ever hand to `server.py` in a single
+call, regardless of `BATCH_SIZE`. `server.py` above has no batching logic of
+its own, so if `BATCH_SIZE` is raised well past `LOCAL_EMBED_CHUNK_SIZE`, the
+client transparently splits the work into chunks of that size before calling
+it — keeping a big, efficient lease from ever overwhelming your machine in
+one call. Start small (5–10) and only raise it once you've confirmed your
+machine handles that size comfortably. Leaving it unset (or `0`) sends the
+whole batch to the local embedder in one call — the old behavior.
 
 ## How to confirm it's actually working
 

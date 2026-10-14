@@ -68,3 +68,52 @@ func TestLoad_ZeroBatchSize_ReturnsError(t *testing.T) {
 		t.Fatal("expected an error for BATCH_SIZE=0, got nil")
 	}
 }
+
+func TestLoad_Defaults_LocalEmbedChunkSizeIsZero(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.LocalEmbedChunkSize != 0 {
+		t.Errorf("expected default LocalEmbedChunkSize 0 (no chunking), got %d", cfg.LocalEmbedChunkSize)
+	}
+}
+
+func TestLoad_LocalEmbedChunkSize_ParsesSetValue(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LOCAL_EMBED_CHUNK_SIZE", "20")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.LocalEmbedChunkSize != 20 {
+		t.Errorf("expected LocalEmbedChunkSize 20, got %d", cfg.LocalEmbedChunkSize)
+	}
+}
+
+func TestLoad_LocalEmbedChunkSize_NotANumber_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LOCAL_EMBED_CHUNK_SIZE", "lots")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-numeric LOCAL_EMBED_CHUNK_SIZE, got nil")
+	}
+}
+
+func TestLoad_LocalEmbedChunkSize_Negative_ReturnsError(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LOCAL_EMBED_CHUNK_SIZE", "-1")
+
+	_, err := Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a negative LOCAL_EMBED_CHUNK_SIZE, got nil")
+	}
+}

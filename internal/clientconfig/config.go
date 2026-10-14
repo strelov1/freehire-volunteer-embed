@@ -10,12 +10,13 @@ import (
 )
 
 type Config struct {
-	ServerURL      string
-	APIKey         string
-	LocalTEIURL    string
-	LocalTEIAPIKey string
-	BatchSize      int
-	PollInterval   time.Duration
+	ServerURL           string
+	APIKey              string
+	LocalTEIURL         string
+	LocalTEIAPIKey      string
+	BatchSize           int
+	LocalEmbedChunkSize int
+	PollInterval        time.Duration
 }
 
 func Load() (Config, error) {
@@ -53,12 +54,31 @@ func Load() (Config, error) {
 		pollInterval = d
 	}
 
+	// Default 0 means no chunking: the whole leased batch goes to the local
+	// embedder in one call, same as before this setting existed. A naive
+	// local embedder with no batching limit of its own can thrash a
+	// machine's memory if handed a large BATCH_SIZE at once, so this lets a
+	// volunteer keep a large, network-efficient lease size while capping
+	// how much their own hardware is asked to embed per call.
+	localEmbedChunkSize := 0
+	if v := os.Getenv("LOCAL_EMBED_CHUNK_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("clientconfig: LOCAL_EMBED_CHUNK_SIZE invalid: %w", err)
+		}
+		if n < 0 {
+			return Config{}, fmt.Errorf("clientconfig: LOCAL_EMBED_CHUNK_SIZE must not be negative, got %d", n)
+		}
+		localEmbedChunkSize = n
+	}
+
 	return Config{
-		ServerURL:      serverURL,
-		APIKey:         apiKey,
-		LocalTEIURL:    localTEIURL,
-		LocalTEIAPIKey: os.Getenv("LOCAL_TEI_API_KEY"),
-		BatchSize:      batchSize,
-		PollInterval:   pollInterval,
+		ServerURL:           serverURL,
+		APIKey:              apiKey,
+		LocalTEIURL:         localTEIURL,
+		LocalTEIAPIKey:      os.Getenv("LOCAL_TEI_API_KEY"),
+		BatchSize:           batchSize,
+		LocalEmbedChunkSize: localEmbedChunkSize,
+		PollInterval:        pollInterval,
 	}, nil
 }

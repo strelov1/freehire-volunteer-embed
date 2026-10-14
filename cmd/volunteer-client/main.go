@@ -31,14 +31,15 @@ func main() {
 	lease := func(ctx context.Context) ([]client.Job, error) {
 		return client.Lease(ctx, httpClient, cfg.ServerURL, cfg.APIKey, cfg.BatchSize)
 	}
-	embedBatch := func(ctx context.Context, texts []string) ([][]float64, error) {
+	embedBatch := chunkedEmbedBatch(func(ctx context.Context, texts []string) ([][]float64, error) {
 		return tei.EmbedBatch(ctx, cfg.LocalTEIURL, cfg.LocalTEIAPIKey, texts)
-	}
+	}, cfg.LocalEmbedChunkSize)
 	submit := func(ctx context.Context, submissions []client.Submission) ([]client.Result, error) {
 		return client.Submit(ctx, httpClient, cfg.ServerURL, cfg.APIKey, submissions)
 	}
 
-	log.Printf("volunteer-client starting: server=%s local-tei=%s batch-size=%d", cfg.ServerURL, cfg.LocalTEIURL, cfg.BatchSize)
+	log.Printf("volunteer-client starting: server=%s local-tei=%s batch-size=%d local-embed-chunk-size=%d",
+		cfg.ServerURL, cfg.LocalTEIURL, cfg.BatchSize, cfg.LocalEmbedChunkSize)
 
 	for {
 		result, err := runOnce(ctx, lease, embedBatch, submit)

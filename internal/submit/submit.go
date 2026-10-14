@@ -29,6 +29,17 @@ const vectorDimension = 768
 // the DB pool with every group at once.
 const submitConcurrency = 8
 
+// trustedTEIMaxBatch mirrors hire's own teiMaxBatch
+// (internal/search/search/embed.go): the trusted TEI server's own
+// --max-client-batch-size rejects a single request carrying more inputs
+// than this outright. A real incident (2026-10-14): combining every
+// pending-check text across a whole Submit call into ONE EmbedBatch call
+// routinely exceeded this once several volunteers were active at once,
+// failing the TEI call every time and leaving everything "pending"
+// forever -- several keys' submissions sat unverified for hours because
+// of exactly this.
+const trustedTEIMaxBatch = 32
+
 type Status int
 
 const (
@@ -151,12 +162,12 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 			refs = append(refs, chunkRef{group: pg, pos: pos})
 		}
 	}
-	trustedVectors, err := tei.EmbedBatch(ctx, teiURL, cfg.TrustedTEIAPIKey, jobTexts)
+	trustedVectors, err := embedInTEIMaxBatches(ctx, teiURL, cfg.TrustedTEIAPIKey, jobTexts)
 	if err != nil {
-		// Trusted TEI unreachable or erroring for the whole batch: every
-		// pending group stays pending with no reputation change, exactly
-		// like a single deferred check before this change — a later
-		// submission gets another chance.
+		// Trusted TEI unreachable or erroring: every pending group stays
+		// pending with no reputation change, exactly like a single
+		// deferred check before this change — a later submission gets
+		// another chance.
 		return results
 	}
 	for i, ref := range refs {
@@ -175,6 +186,28 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 	_ = finish.Wait()
 
 	return results
+}
+
+// embedInTEIMaxBatches calls tei.EmbedBatch in sub-batches of at most
+// trustedTEIMaxBatch texts, concatenating the results in order — the
+// trusted TEI rejects a single call over its own --max-client-batch-size
+// outright, so one shared call covering a whole Submit request's pending
+// checks (the optimization this replaces a single unbounded call for)
+// must still respect that ceiling itself.
+func embedInTEIMaxBatches(ctx context.Context, teiURL, apiKey string, texts []string) ([][]float64, error) {
+	if len(texts) <= trustedTEIMaxBatch {
+		return tei.EmbedBatch(ctx, teiURL, apiKey, texts)
+	}
+	vectors := make([][]float64, 0, len(texts))
+	for start := 0; start < len(texts); start += trustedTEIMaxBatch {
+		end := min(start+trustedTEIMaxBatch, len(texts))
+		chunkVectors, err := tei.EmbedBatch(ctx, teiURL, apiKey, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+		vectors = append(vectors, chunkVectors...)
+	}
+	return vectors, nil
 }
 
 // stageGroup validates and lease-checks every chunk belonging to one

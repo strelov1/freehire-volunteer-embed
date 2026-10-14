@@ -640,6 +640,65 @@ func TestSubmit_DatabaseErrorOnOneItem_DoesNotAbortWholeBatch(t *testing.T) {
 	}
 }
 
+// TestSubmit_ManyPendingChecks_ChunksTEICallsToItsOwnMaxBatchSize guards a
+// real production incident (2026-10-14): the trusted TEI server enforces
+// its own --max-client-batch-size (32, matching hire's teiMaxBatch) and
+// rejects a single request carrying more inputs than that with a plain
+// error -- which, before this fix, meant combining every pending-check
+// item in a batch into ONE EmbedBatch call made the WHOLE call fail
+// outright the moment a batch's items needing a check exceeded 32,
+// silently leaving every one of them "pending" forever (confirmed live:
+// several active volunteers' submissions sat unverified for hours because
+// of exactly this). The fake server below rejects any request over 32
+// inputs, the same way the real TEI does -- Submit must split its one
+// logical "verify everything pending" step into sub-requests that respect
+// that ceiling, not send it all in one shot.
+func TestSubmit_ManyPendingChecks_ChunksTEICallsToItsOwnMaxBatchSize(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+	const itemCount = 71 // > 32, matching the real incident's batch size
+
+	submitted := fixtureVector()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Inputs) > 32 {
+			http.Error(w, "batch size exceeds maximum allowed batch size 32", http.StatusBadRequest)
+			return
+		}
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			vectors[i] = submitted
+		}
+		_ = json.NewEncoder(w).Encode(vectors)
+	}))
+	defer server.Close()
+
+	items := make([]Item, itemCount)
+	for i := 0; i < itemCount; i++ {
+		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: submitted}
+	}
+
+	results := Submit(ctx, pool, keyID, items, server.URL, testCfg())
+	for i, r := range results {
+		if r.Status != StatusAccepted {
+			t.Errorf("results[%d].Status = %v, want StatusAccepted", i, r.Status)
+		}
+	}
+
+	var verifiedCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM volunteer_submissions WHERE status = 'verified'`).Scan(&verifiedCount); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if verifiedCount != itemCount {
+		t.Errorf("verified submissions = %d, want %d (a real TEI's own batch-size limit must not leave everything pending forever)", verifiedCount, itemCount)
+	}
+}
+
 // TestSubmit_MultiChunkJob_AllVerified_PromotesEveryChunk is the core proof
 // of the actual fix: a job needing more than one chunk is promoted with
 // ALL of its chunks, and reputation is only touched ONCE for the whole

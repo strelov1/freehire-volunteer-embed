@@ -29,18 +29,29 @@ func IsBanned(ctx context.Context, pool *pgxpool.Pool, keyID int64) (bool, error
 	return bannedAt != nil, nil
 }
 
-// GetCounts returns a key's current total_evaluated and consecutive_passes,
-// both zero for a key with no reputation row yet (never submitted).
-func GetCounts(ctx context.Context, pool *pgxpool.Pool, keyID int64) (totalEvaluated, consecutivePasses int, err error) {
-	err = pool.QueryRow(ctx,
-		`SELECT total_evaluated, consecutive_passes FROM volunteer_reputation WHERE key_id = $1`,
-		keyID,
-	).Scan(&totalEvaluated, &consecutivePasses)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, nil
-	}
+// TakeTurn claims a key's next check-decision turn: it advances
+// total_evaluated by one and returns the value it held BEFORE (zero for a
+// key that has never submitted) along with consecutive_passes, in one
+// atomic statement. The turn is what ShouldCheck decides on, and claiming
+// it is the only thing that advances total_evaluated.
+//
+// Reading the counters and advancing them later, once the outcome was
+// known, made two failures (2026-10-18): concurrent groups in one batch all
+// read the same value and so all reached the same decision — once in every
+// divisor batches the whole batch was re-embedded through the trusted TEI —
+// and a check the TEI could not finish advanced nothing, so the next
+// submission landed on the same "check" turn again.
+func TakeTurn(ctx context.Context, pool *pgxpool.Pool, keyID int64) (turn, consecutivePasses int, err error) {
+	err = pool.QueryRow(ctx, `
+		INSERT INTO volunteer_reputation (key_id, total_evaluated)
+		VALUES ($1, 1)
+		ON CONFLICT (key_id) DO UPDATE SET
+			total_evaluated = volunteer_reputation.total_evaluated + 1,
+			updated_at = now()
+		RETURNING total_evaluated - 1, consecutive_passes
+	`, keyID).Scan(&turn, &consecutivePasses)
 	if err != nil {
-		return 0, 0, fmt.Errorf("reputation: get counts for key %d: %w", keyID, err)
+		return 0, 0, fmt.Errorf("reputation: take turn for key %d: %w", keyID, err)
 	}
-	return totalEvaluated, consecutivePasses, nil
+	return turn, consecutivePasses, nil
 }

@@ -7,26 +7,7 @@ import (
 	"github.com/strelov1/freehire-volunteer-embed/internal/testdb"
 )
 
-func TestRecordSkipped_NewKey_CreatesRowWithOnlyTotalEvaluatedIncremented(t *testing.T) {
-	pool := testdb.Setup(t)
-	ctx := context.Background()
-
-	if err := RecordSkipped(ctx, pool, 1); err != nil {
-		t.Fatalf("RecordSkipped: %v", err)
-	}
-
-	var totalEvaluated, consecutivePasses, consecutiveFails int
-	if err := pool.QueryRow(ctx,
-		`SELECT total_evaluated, consecutive_passes, consecutive_fails FROM volunteer_reputation WHERE key_id = 1`,
-	).Scan(&totalEvaluated, &consecutivePasses, &consecutiveFails); err != nil {
-		t.Fatalf("querying row: %v", err)
-	}
-	if totalEvaluated != 1 || consecutivePasses != 0 || consecutiveFails != 0 {
-		t.Errorf("got (%d, %d, %d), want (1, 0, 0)", totalEvaluated, consecutivePasses, consecutiveFails)
-	}
-}
-
-func TestRecordPassed_IncrementsTotalAndPasses_ResetsFails(t *testing.T) {
+func TestRecordPassed_IncrementsPasses_ResetsFails_LeavesTotal(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
@@ -47,12 +28,12 @@ func TestRecordPassed_IncrementsTotalAndPasses_ResetsFails(t *testing.T) {
 	).Scan(&totalEvaluated, &consecutivePasses, &consecutiveFails); err != nil {
 		t.Fatalf("querying row: %v", err)
 	}
-	if totalEvaluated != 6 || consecutivePasses != 3 || consecutiveFails != 0 {
-		t.Errorf("got (%d, %d, %d), want (6, 3, 0)", totalEvaluated, consecutivePasses, consecutiveFails)
+	if totalEvaluated != 5 || consecutivePasses != 3 || consecutiveFails != 0 {
+		t.Errorf("got (%d, %d, %d), want (5, 3, 0) — TakeTurn, not RecordPassed, advances total_evaluated", totalEvaluated, consecutivePasses, consecutiveFails)
 	}
 }
 
-func TestRecordFailed_IncrementsTotalAndFails_ResetsPasses_NotYetBanned(t *testing.T) {
+func TestRecordFailed_IncrementsFails_ResetsPasses_NotYetBanned(t *testing.T) {
 	pool := testdb.Setup(t)
 	ctx := context.Background()
 
@@ -78,8 +59,8 @@ func TestRecordFailed_IncrementsTotalAndFails_ResetsPasses_NotYetBanned(t *testi
 	).Scan(&totalEvaluated, &consecutivePasses, &consecutiveFails, &bannedAt); err != nil {
 		t.Fatalf("querying row: %v", err)
 	}
-	if totalEvaluated != 6 || consecutivePasses != 0 || consecutiveFails != 2 {
-		t.Errorf("got (%d, %d, %d), want (6, 0, 2)", totalEvaluated, consecutivePasses, consecutiveFails)
+	if totalEvaluated != 5 || consecutivePasses != 0 || consecutiveFails != 2 {
+		t.Errorf("got (%d, %d, %d), want (5, 0, 2) — TakeTurn, not RecordFailed, advances total_evaluated", totalEvaluated, consecutivePasses, consecutiveFails)
 	}
 	if bannedAt != nil {
 		t.Errorf("banned_at = %v, want nil (only 2 consecutive fails, ban threshold is 3)", *bannedAt)

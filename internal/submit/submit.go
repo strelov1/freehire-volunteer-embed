@@ -110,14 +110,10 @@ type pendingGroup struct {
 // ahead of several volunteers each submitting large batches at once.
 //
 // Staging and finishing each run with bounded concurrency
-// (submitConcurrency) across job-groups, not strictly in order. For
-// groups sharing a key, this means the check-vs-skip decision
-// (reputation.ShouldCheck) can read a stale, pre-increment snapshot of
-// that key's counters — a batch can sample a slightly different set of
-// jobs for checking than a fully sequential run would have. The counters
-// themselves do not lose updates under this: each Record* call is one
-// atomic SQL UPDATE, serialized by Postgres's own row lock regardless of
-// Go-level concurrency.
+// (submitConcurrency) across job-groups, not strictly in order. Each group
+// still gets its own check-vs-skip decision: reputation.TakeTurn claims a
+// distinct turn in one atomic statement, serialized by Postgres's row lock,
+// so a batch is checked at the key's rate rather than all-or-nothing.
 func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
 
@@ -271,24 +267,7 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	// JobChunks and GetCounts hit unrelated tables for unrelated keys
-	// (jobID vs keyID) — run them concurrently rather than one after the
-	// other, since under this service's real load both round trips were
-	// paying the host's full network latency sequentially for no reason.
-	var expected []string
-	var totalEvaluated, consecutivePasses int
-	var expectedErr, countsErr error
-	var fetch errgroup.Group
-	fetch.Go(func() error {
-		expected, expectedErr = hiredata.JobChunks(ctx, pool, jobID)
-		return nil
-	})
-	fetch.Go(func() error {
-		totalEvaluated, consecutivePasses, countsErr = reputation.GetCounts(ctx, pool, keyID)
-		return nil
-	})
-	_ = fetch.Wait()
-
+	expected, expectedErr := hiredata.JobChunks(ctx, pool, jobID)
 	if expectedErr != nil {
 		log.Printf("submit: job %d: fetching current chunk set: %v (leaving %d staged chunk(s) pending)", jobID, expectedErr, len(staged))
 		return nil // leave whatever staged for a later pass
@@ -303,12 +282,15 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	if countsErr != nil {
-		log.Printf("submit: key %d: fetching reputation counts: %v (leaving %d staged chunk(s) pending)", keyID, countsErr, len(staged))
+	// Taken only once the job is decidable, so an incomplete chunk set
+	// spends no turn.
+	turn, consecutivePasses, err := reputation.TakeTurn(ctx, pool, keyID)
+	if err != nil {
+		log.Printf("submit: key %d: %v (leaving %d staged chunk(s) pending)", keyID, err, len(staged))
 		return nil
 	}
 
-	if !reputation.ShouldCheck(totalEvaluated, consecutivePasses, cfg) {
+	if !reputation.ShouldCheck(turn, consecutivePasses, cfg) {
 		finishSkipped(ctx, pool, keyID, outboxID, jobID, staged)
 		return nil
 	}
@@ -385,12 +367,9 @@ func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) (
 	return StatusAccepted, &stagedItem{chunkIndex: item.ChunkIndex, submissionID: submissionID, vector: item.Vector}
 }
 
-// finishSkipped records a submission trusted on track record, with no TEI
+// finishSkipped finishes a submission trusted on track record, with no TEI
 // call at all, and promotes the job's whole chunk set.
 func finishSkipped(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID, jobID int64, staged map[int]stagedItem) {
-	if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
-		log.Printf("submit: record skipped for key %d, job %d: %v", keyID, jobID, err)
-	}
 	if err := promote.Replace(ctx, pool, outboxID, jobID, chunkVectors(staged)); err != nil {
 		log.Printf("submit: promote job %d: %v", jobID, err)
 		return // do not finalize: nothing actually reached job_semantic_chunks

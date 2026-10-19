@@ -38,6 +38,7 @@ Save this as `server.py` in the same folder:
 ```python
 #!/usr/bin/env python3
 import json
+import threading
 import torch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from transformers import AutoTokenizer, AutoModel
@@ -50,17 +51,21 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModel.from_pretrained(MODEL_NAME).to(DEVICE).eval()
 print("ready")
 
+# The GPU backend is not thread-safe: two requests running the model at
+# once crash the server. Requests are still read and written in parallel.
+_model_lock = threading.Lock()
+
 
 def embed(texts):
-    batch = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(DEVICE)
-    with torch.no_grad():
+    with _model_lock, torch.no_grad():
+        batch = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(DEVICE)
         out = model(**batch)
-    mask = batch["attention_mask"].unsqueeze(-1).float()
-    summed = (out.last_hidden_state * mask).sum(dim=1)
-    counts = mask.sum(dim=1).clamp(min=1e-9)
-    pooled = summed / counts
-    normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
-    return normalized.cpu().tolist()
+        mask = batch["attention_mask"].unsqueeze(-1).float()
+        summed = (out.last_hidden_state * mask).sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1e-9)
+        pooled = summed / counts
+        normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        return normalized.cpu().tolist()
 
 
 class Handler(BaseHTTPRequestHandler):

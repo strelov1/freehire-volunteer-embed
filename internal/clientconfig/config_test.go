@@ -115,8 +115,8 @@ func TestLoad_Defaults_LocalEmbedChunkSizeMax(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.LocalEmbedChunkSizeMax != 100 {
-		t.Errorf("expected default LocalEmbedChunkSizeMax 100, got %d", cfg.LocalEmbedChunkSizeMax)
+	if cfg.LocalEmbedChunkSizeMax != 16 {
+		t.Errorf("expected default LocalEmbedChunkSizeMax 16, got %d", cfg.LocalEmbedChunkSizeMax)
 	}
 }
 
@@ -153,5 +153,44 @@ func TestLoad_LocalEmbedChunkSize_Negative_ReturnsError(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected an error for a negative LOCAL_EMBED_CHUNK_SIZE, got nil")
+	}
+}
+
+func TestLoad_LoadDefaultsToMedium(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LoadPercent != 50 {
+		t.Errorf("LoadPercent = %d, want 50 (medium) when LOAD is unset", cfg.LoadPercent)
+	}
+}
+
+func TestLoad_LoadAcceptsModesAndPercentages(t *testing.T) {
+	for in, want := range map[string]int{"easy": 25, "medium": 50, "hard": 100, "HARD": 100, "1": 1, "70": 70, "100": 100, "80%": 80} {
+		setRequiredEnv(t)
+		t.Setenv("LOAD", in)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Errorf("LOAD=%q: Load: %v", in, err)
+			continue
+		}
+		if cfg.LoadPercent != want {
+			t.Errorf("LOAD=%q: LoadPercent = %d, want %d", in, cfg.LoadPercent, want)
+		}
+	}
+}
+
+func TestLoad_LoadRejectsAnythingElse(t *testing.T) {
+	for _, in := range []string{"0", "101", "-5", "max", "fast"} {
+		setRequiredEnv(t)
+		t.Setenv("LOAD", in)
+
+		if _, err := Load(); err == nil {
+			t.Errorf("LOAD=%q: expected an error, got nil", in)
+		}
 	}
 }

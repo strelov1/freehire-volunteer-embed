@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,11 @@ type Config struct {
 	LocalEmbedChunkSize    int
 	LocalEmbedChunkSizeMax int
 	PollInterval           time.Duration
+	// LoadPercent is how much of the time the local embedder may be busy,
+	// 1..100: LOAD=easy (25), medium (50, the default), hard (100), or a
+	// number. It is a share of the volunteer's machine, so the default
+	// leaves half of it to whatever else they are doing.
+	LoadPercent int
 }
 
 func Load() (Config, error) {
@@ -72,16 +78,26 @@ func Load() (Config, error) {
 		localEmbedChunkSize = n
 	}
 
-	// A volunteer's real safe ceiling depends on their own hardware and is
-	// unknowable in advance; 100 is a conservative starting point, not a
-	// measured safe value for every machine — a machine that still can't
-	// hold this much in memory at once should lower it explicitly.
-	localEmbedChunkSizeMax, err := intEnvOrDefault("LOCAL_EMBED_CHUNK_SIZE_MAX", 100)
+	// Measured 2026-10-18 on an Apple Silicon Mac (multilingual-e5-base on
+	// MPS, 512-token texts): throughput is flat from 1 to 64 texts per call,
+	// ~18-22 texts/s, peaking at 8 — the GPU is saturated by one text. A
+	// bigger call buys nothing and costs memory that grows with it, and on
+	// real descriptions of mixed length it also pays for padding every text
+	// to the longest: the tuner, left to climb to 90, ran ~290ms a text
+	// against ~40ms at 1-4 while the machine dropped to 18% free memory. 16
+	// keeps headroom over the peak for faster hardware; raise it for a
+	// discrete GPU, where bigger calls do pay.
+	localEmbedChunkSizeMax, err := intEnvOrDefault("LOCAL_EMBED_CHUNK_SIZE_MAX", 16)
 	if err != nil {
 		return Config{}, err
 	}
 	if localEmbedChunkSizeMax <= 0 {
 		return Config{}, fmt.Errorf("clientconfig: LOCAL_EMBED_CHUNK_SIZE_MAX must be positive, got %d", localEmbedChunkSizeMax)
+	}
+
+	loadPercent, err := parseLoad(os.Getenv("LOAD"))
+	if err != nil {
+		return Config{}, err
 	}
 
 	return Config{
@@ -93,7 +109,25 @@ func Load() (Config, error) {
 		LocalEmbedChunkSize:    localEmbedChunkSize,
 		LocalEmbedChunkSizeMax: localEmbedChunkSizeMax,
 		PollInterval:           pollInterval,
+		LoadPercent:            loadPercent,
 	}, nil
+}
+
+var loadModes = map[string]int{"easy": 25, "medium": 50, "hard": 100}
+
+func parseLoad(v string) (int, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return loadModes["medium"], nil
+	}
+	if n, ok := loadModes[v]; ok {
+		return n, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(v, "%"))
+	if err != nil || n < 1 || n > 100 {
+		return 0, fmt.Errorf("clientconfig: LOAD must be easy, medium, hard or a percentage 1..100, got %q", v)
+	}
+	return n, nil
 }
 
 func intEnvOrDefault(name string, fallback int) (int, error) {

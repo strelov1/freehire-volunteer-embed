@@ -114,15 +114,31 @@ API_KEY="<your fhk_ key>" \
 LOCAL_TEI_URL="http://127.0.0.1:8080/embed" \
 BATCH_SIZE=50 \
 POLL_INTERVAL=10s \
+LOAD=medium \
 ./volunteer-client-darwin-arm64   # use the binary name matching your OS
 ```
+
+`LOAD` is how much of your machine the client may use — the share of time
+`server.py` is kept busy:
+
+- `easy` — 25%, barely noticeable
+- `medium` — 50%, the default
+- `hard` — 100%, the embedder never waits
+- or any percentage from 1 to 100, e.g. `LOAD=70`
+
+Run **one** client per machine: it already keeps several jobs in flight at
+once, so a second client only competes with the first for the same
+`server.py`. `POLL_INTERVAL` is how long it waits when the server has no
+work for it (or a request failed) — never after a batch that went through.
 
 `BATCH_SIZE` is how many jobs the client pulls from the server per round trip
 — raising it reduces network overhead. By default the client does **not**
 hand that whole batch to `server.py` in one call: it starts by sending just 5
-texts at a time, and automatically grows that number for as long as the
-local embedder keeps responding quickly, backing off the moment it slows
-down or errors. This runs by itself — no tuning required, and it keeps
+texts at a time, and automatically grows that number (up to 16 —
+`LOCAL_EMBED_CHUNK_SIZE_MAX`; on a Mac a bigger call is no faster and costs
+memory) for as long as the local embedder keeps responding quickly and the
+machine has memory to spare, backing off the moment it slows down or
+errors. This runs by itself — no tuning required, and it keeps
 re-adjusting for as long as the client keeps running.
 
 If you want to pin it to a fixed size instead (e.g. to deliberately keep an
@@ -139,7 +155,7 @@ The log should show lines like:
 
 ```
 submit job 123456: accepted
-leased=5 submitted=5
+worker 1: leased=50 submitted=50
 ```
 
 Seeing this means it's working — real jobs are actually being processed.

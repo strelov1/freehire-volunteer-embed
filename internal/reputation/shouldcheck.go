@@ -13,11 +13,11 @@ import "github.com/strelov1/freehire-volunteer-embed/internal/config"
 // long the streak has run, using totalEvaluated as a deterministic
 // counter so the rate never collapses to zero.
 //
-// Contract for callers: totalEvaluated must be incremented once per call to
-// this function — i.e. once per submission routed through this decision —
-// whether or not that call actually performed a check. Incrementing it only
-// when a check is actually performed would let the counter settle on a
-// value that is never a multiple of the active divisor, permanently
+// Contract for callers: totalEvaluated must be the turn TakeTurns handed
+// this one submission — a value no other submission saw, and already
+// advanced whether or not the check is performed or finishes. Advancing it
+// only when a check is actually performed would let the counter settle on
+// a value that is never a multiple of the active divisor, permanently
 // stopping checks for that key.
 func ShouldCheck(totalEvaluated, consecutivePasses int, cfg config.Config) bool {
 	if totalEvaluated < cfg.FullCheckThreshold || consecutivePasses < cfg.FullCheckThreshold {

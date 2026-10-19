@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -567,8 +568,8 @@ func TestSubmit_ManyItemsNeedingVerification_OneSharedTEICall(t *testing.T) {
 // TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates guards
 // against the obvious risk of making Submit concurrent: multiple goroutines
 // incrementing the same key's reputation row must not lose updates to a
-// naive, non-atomic read-modify-write race. Each Record* call is already a
-// single atomic SQL UPDATE, so Postgres's row lock should serialize these
+// naive, non-atomic read-modify-write race. TakeTurns is a single atomic
+// SQL upsert, so Postgres's row lock should serialize these
 // correctly regardless of Go-level concurrency — this proves it.
 func TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates(t *testing.T) {
 	pool := testdb.Setup(t)
@@ -580,12 +581,11 @@ func TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates(t *test
 	// FullCheckThreshold (20) before the divisor rule applies at all, and
 	// divisor=30 once consecutive_passes clears 2*threshold. total_evaluated
 	// climbs by exactly itemCount over this test (no lost updates is what
-	// it's proving), so the whole climbed range -- seed..seed+itemCount --
-	// must avoid any multiple of 30: if a goroutine's read landed on one,
-	// that item would decide it needs an actual check, hit the deliberately
-	// unreachable TEI, and defer without incrementing anything, which looks
-	// identical to a lost update but isn't one. 31..51 contains no multiple
-	// of 30.
+	// it's proving), and the whole climbed range -- seed..seed+itemCount --
+	// avoids any multiple of 30 so no item needs a real check against the
+	// deliberately unreachable TEI (31..51 contains none) — not that a
+	// deferred check would stop the count any more: TakeTurns advances it
+	// whatever happens to the check.
 	const seedTotalEvaluated = 31
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO volunteer_reputation (key_id, total_evaluated, consecutive_passes)
@@ -981,5 +981,85 @@ func TestFinishChecked_PromoteFails_LeavesRowPending(t *testing.T) {
 	}
 	if chunkCount != 0 {
 		t.Errorf("job_semantic_chunks rows = %d, want 0 (the dimension-mismatched insert must have failed)", chunkCount)
+	}
+}
+
+// TestSubmit_TrustedKeyBatch_ChecksOnlyItsShareOfJobs is the 2026-10-18
+// incident: every group in a batch read the key's counters before any of
+// them advanced it, so all of them landed on the same total_evaluated and
+// made the same decision. Once in every divisor batches that decision was
+// "check", and the WHOLE batch was re-embedded through the trusted TEI —
+// a ~90-chunk call on a shared CPU TEI, longer than the client's 55s
+// timeout. A trusted key must have exactly one job in divisor checked,
+// however the jobs are batched.
+func TestSubmit_TrustedKeyBatch_ChecksOnlyItsShareOfJobs(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+	const itemCount = 30 // == CheckDivisorStage2
+
+	// A multiple of 30, past both thresholds: the batch starts on a "check" turn.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO volunteer_reputation (key_id, total_evaluated, consecutive_passes)
+		VALUES ($1, 300, 300)
+	`, keyID); err != nil {
+		t.Fatalf("seed reputation: %v", err)
+	}
+
+	submitted := fixtureVector()
+	var checkedTexts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Inputs []string `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		checkedTexts.Add(int64(len(body.Inputs)))
+		vectors := make([][]float64, len(body.Inputs))
+		for i := range vectors {
+			vectors[i] = submitted
+		}
+		_ = json.NewEncoder(w).Encode(vectors)
+	}))
+	defer server.Close()
+
+	items := make([]Item, itemCount)
+	for i := 0; i < itemCount; i++ {
+		jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+		items[i] = Item{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: submitted}
+	}
+
+	Submit(ctx, pool, keyID, items, server.URL, testCfg())
+
+	if got := checkedTexts.Load(); got != 1 {
+		t.Errorf("trusted TEI re-embedded %d of %d jobs, want exactly 1 (one in CheckDivisorStage2)", got, itemCount)
+	}
+}
+
+// TestSubmit_DeferredCheck_StillAdvancesTheCounter: a check the trusted TEI
+// could not finish used to leave total_evaluated where it was, so the next
+// submission landed on the very same "check" turn — and under load that
+// one deferred too, forever. Taking the turn is what advances the counter,
+// whatever happens to the check afterwards.
+func TestSubmit_DeferredCheck_StillAdvancesTheCounter(t *testing.T) {
+	pool := testdb.Setup(t)
+	ctx := context.Background()
+	const keyID = int64(1)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO volunteer_reputation (key_id, total_evaluated, consecutive_passes)
+		VALUES ($1, 300, 300)
+	`, keyID); err != nil {
+		t.Fatalf("seed reputation: %v", err)
+	}
+	jobID, outboxID := seedLeasedJob(t, pool, keyID, time.Now().Add(5*time.Minute))
+
+	Submit(ctx, pool, keyID, []Item{{OutboxID: outboxID, JobID: jobID, ChunkIndex: 0, Vector: fixtureVector()}}, unreachableTEIURL, testCfg())
+
+	var totalEvaluated int
+	if err := pool.QueryRow(ctx, `SELECT total_evaluated FROM volunteer_reputation WHERE key_id = $1`, keyID).Scan(&totalEvaluated); err != nil {
+		t.Fatalf("querying volunteer_reputation: %v", err)
+	}
+	if totalEvaluated != 301 {
+		t.Errorf("total_evaluated = %d after a deferred check, want 301", totalEvaluated)
 	}
 }

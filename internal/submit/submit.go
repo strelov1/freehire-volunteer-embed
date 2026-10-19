@@ -6,10 +6,12 @@ package submit
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
@@ -108,14 +110,12 @@ type pendingGroup struct {
 // ahead of several volunteers each submitting large batches at once.
 //
 // Staging and finishing each run with bounded concurrency
-// (submitConcurrency) across job-groups, not strictly in order. For
-// groups sharing a key, this means the check-vs-skip decision
-// (reputation.ShouldCheck) can read a stale, pre-increment snapshot of
-// that key's counters — a batch can sample a slightly different set of
-// jobs for checking than a fully sequential run would have. The counters
-// themselves do not lose updates under this: each Record* call is one
-// atomic SQL UPDATE, serialized by Postgres's own row lock regardless of
-// Go-level concurrency.
+// (submitConcurrency) across job-groups, not strictly in order. Each group
+// still gets its own check-vs-skip decision: reputation.TakeTurns claims
+// one turn per group up front, in one atomic statement, so a batch is
+// checked at the key's rate rather than all-or-nothing. A group that turns
+// out incomplete wastes its turn, which only shifts where the next check
+// falls.
 func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
 
@@ -128,6 +128,11 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 		indicesByOutbox[item.OutboxID] = append(indicesByOutbox[item.OutboxID], i)
 	}
 
+	firstTurn, consecutivePasses, turnsErr := reputation.TakeTurns(ctx, pool, keyID, len(outboxOrder))
+	if turnsErr != nil {
+		log.Printf("submit: %v (every staged chunk stays pending)", turnsErr)
+	}
+
 	pendingSlots := make([]*pendingGroup, len(outboxOrder))
 	var stage errgroup.Group
 	stage.SetLimit(submitConcurrency)
@@ -135,7 +140,8 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 		gi, outboxID := gi, outboxID
 		indices := indicesByOutbox[outboxID]
 		stage.Go(func() error {
-			pendingSlots[gi] = stageGroup(ctx, pool, keyID, outboxID, indices, items, results, cfg)
+			check := reputation.ShouldCheck(firstTurn+gi, consecutivePasses, cfg)
+			pendingSlots[gi] = stageGroup(ctx, pool, keyID, outboxID, indices, items, results, turnsErr == nil, check)
 			return nil
 		})
 	}
@@ -247,13 +253,14 @@ func embedInTEIMaxBatches(ctx context.Context, teiURL, apiKey string, texts []st
 // stageGroup validates and lease-checks every chunk belonging to one
 // outbox row, stages each valid one in volunteer_submissions, and then —
 // only if every chunk the job's CURRENT description actually expects was
-// staged, no more and no fewer — decides once whether this job's
-// submission needs a spot-check. A skip decision is finished immediately
+// staged, no more and no fewer — acts on check, the decision Submit made
+// from this group's turn (decidable is false when no turn could be
+// claimed). A skip decision is finished immediately
 // (no TEI call needed at all); a check decision returns a *pendingGroup
 // for the batched TEI call. An incomplete or otherwise undecidable group
 // returns nil: every chunk that did stage is left "pending" for a later
 // pass, same as any other verification hiccup.
-func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, indices []int, items []Item, results []Result, cfg config.Config) *pendingGroup {
+func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, indices []int, items []Item, results []Result, decidable, check bool) *pendingGroup {
 	jobID := items[indices[0]].JobID
 	staged := map[int]stagedItem{} // by chunk_index
 
@@ -269,9 +276,9 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	expected, err := hiredata.JobChunks(ctx, pool, jobID)
-	if err != nil {
-		log.Printf("submit: job %d: fetching current chunk set: %v (leaving %d staged chunk(s) pending)", jobID, err, len(staged))
+	expected, expectedErr := hiredata.JobChunks(ctx, pool, jobID)
+	if expectedErr != nil {
+		log.Printf("submit: job %d: fetching current chunk set: %v (leaving %d staged chunk(s) pending)", jobID, expectedErr, len(staged))
 		return nil // leave whatever staged for a later pass
 	}
 	if !matchesExpectedChunkSet(staged, len(expected)) {
@@ -284,13 +291,11 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	totalEvaluated, consecutivePasses, err := reputation.GetCounts(ctx, pool, keyID)
-	if err != nil {
-		log.Printf("submit: key %d: fetching reputation counts: %v (leaving %d staged chunk(s) pending)", keyID, err, len(staged))
-		return nil
+	if !decidable {
+		return nil // no turn could be claimed: leave what staged for a later pass
 	}
 
-	if !reputation.ShouldCheck(totalEvaluated, consecutivePasses, cfg) {
+	if !check {
 		finishSkipped(ctx, pool, keyID, outboxID, jobID, staged)
 		return nil
 	}
@@ -335,45 +340,41 @@ func matchesExpectedChunkSet(staged map[int]stagedItem, expectedCount int) bool 
 	return true
 }
 
-// stageOne validates one chunk and confirms its lease, then stages it in
-// volunteer_submissions.
+// stageOne validates one chunk and, in a single round trip, inserts it
+// into volunteer_submissions only if its lease is still held — the
+// WHERE-EXISTS subquery folds in what used to be a separate leased-check
+// SELECT before this INSERT, halving stageOne's own round trips. No rows
+// returned means either the lease is gone/expired or it never existed;
+// either way the caller should treat it as StatusNotLeased, since this
+// function has no way (and no need) to tell those two cases apart.
 func stageOne(ctx context.Context, pool *pgxpool.Pool, keyID int64, item Item) (Status, *stagedItem) {
 	if !validVector(item.Vector) {
 		return StatusInvalidVector, nil
 	}
 
-	var leased bool
-	err := pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM volunteer_leases
-			WHERE outbox_id = $1 AND leased_by_key_id = $2 AND expires_at > now()
-		)
-	`, item.OutboxID, keyID).Scan(&leased)
-	if err != nil {
-		return StatusError, nil
-	}
-	if !leased {
-		return StatusNotLeased, nil
-	}
-
 	var submissionID int64
-	if err := pool.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		INSERT INTO volunteer_submissions (job_id, submitted_by_key_id, embedding, chunk_index, status)
-		VALUES ($1, $2, $3, $4, 'pending')
+		SELECT $1, $2, $3, $4, 'pending'
+		WHERE EXISTS (
+			SELECT 1 FROM volunteer_leases
+			WHERE outbox_id = $5 AND leased_by_key_id = $2 AND expires_at > now()
+		)
 		RETURNING id
-	`, item.JobID, keyID, pgvec.Format(item.Vector), item.ChunkIndex).Scan(&submissionID); err != nil {
+	`, item.JobID, keyID, pgvec.Format(item.Vector), item.ChunkIndex, item.OutboxID).Scan(&submissionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StatusNotLeased, nil
+		}
 		return StatusError, nil
 	}
 
 	return StatusAccepted, &stagedItem{chunkIndex: item.ChunkIndex, submissionID: submissionID, vector: item.Vector}
 }
 
-// finishSkipped records a submission trusted on track record, with no TEI
+// finishSkipped finishes a submission trusted on track record, with no TEI
 // call at all, and promotes the job's whole chunk set.
 func finishSkipped(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID, jobID int64, staged map[int]stagedItem) {
-	if err := reputation.RecordSkipped(ctx, pool, keyID); err != nil {
-		log.Printf("submit: record skipped for key %d, job %d: %v", keyID, jobID, err)
-	}
 	if err := promote.Replace(ctx, pool, outboxID, jobID, chunkVectors(staged)); err != nil {
 		log.Printf("submit: promote job %d: %v", jobID, err)
 		return // do not finalize: nothing actually reached job_semantic_chunks
@@ -433,15 +434,22 @@ func chunkVectors(staged map[int]stagedItem) []promote.ChunkVector {
 	return out
 }
 
+// finalizeGroup marks every staged chunk's submission with the same final
+// status in one round trip (WHERE id = ANY) rather than one UPDATE per
+// chunk — a multi-chunk job otherwise paid one extra round trip per chunk
+// here for no reason, since every chunk in a group always finalizes
+// together.
 func finalizeGroup(ctx context.Context, pool *pgxpool.Pool, keyID, jobID int64, staged map[int]stagedItem, status string) {
+	ids := make([]int64, 0, len(staged))
 	for _, si := range staged {
 		log.Printf("AUDIT verify key=%d job=%d submission=%d outcome=%s", keyID, jobID, si.submissionID, status)
-		if _, err := pool.Exec(ctx,
-			`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = $2`,
-			status, si.submissionID,
-		); err != nil {
-			log.Printf("submit: finalize submission %d as %s: %v", si.submissionID, status, err)
-		}
+		ids = append(ids, si.submissionID)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE volunteer_submissions SET status = $1, decided_at = now() WHERE id = ANY($2)`,
+		status, ids,
+	); err != nil {
+		log.Printf("submit: finalize submissions %v as %s: %v", ids, status, err)
 	}
 }
 

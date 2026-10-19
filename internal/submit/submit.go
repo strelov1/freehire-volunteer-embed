@@ -111,9 +111,11 @@ type pendingGroup struct {
 //
 // Staging and finishing each run with bounded concurrency
 // (submitConcurrency) across job-groups, not strictly in order. Each group
-// still gets its own check-vs-skip decision: reputation.TakeTurn claims a
-// distinct turn in one atomic statement, serialized by Postgres's row lock,
-// so a batch is checked at the key's rate rather than all-or-nothing.
+// still gets its own check-vs-skip decision: reputation.TakeTurns claims
+// one turn per group up front, in one atomic statement, so a batch is
+// checked at the key's rate rather than all-or-nothing. A group that turns
+// out incomplete wastes its turn, which only shifts where the next check
+// falls.
 func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, teiURL string, cfg config.Config) []Result {
 	results := make([]Result, len(items))
 
@@ -126,6 +128,11 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 		indicesByOutbox[item.OutboxID] = append(indicesByOutbox[item.OutboxID], i)
 	}
 
+	firstTurn, consecutivePasses, turnsErr := reputation.TakeTurns(ctx, pool, keyID, len(outboxOrder))
+	if turnsErr != nil {
+		log.Printf("submit: %v (every staged chunk stays pending)", turnsErr)
+	}
+
 	pendingSlots := make([]*pendingGroup, len(outboxOrder))
 	var stage errgroup.Group
 	stage.SetLimit(submitConcurrency)
@@ -133,7 +140,8 @@ func Submit(ctx context.Context, pool *pgxpool.Pool, keyID int64, items []Item, 
 		gi, outboxID := gi, outboxID
 		indices := indicesByOutbox[outboxID]
 		stage.Go(func() error {
-			pendingSlots[gi] = stageGroup(ctx, pool, keyID, outboxID, indices, items, results, cfg)
+			check := reputation.ShouldCheck(firstTurn+gi, consecutivePasses, cfg)
+			pendingSlots[gi] = stageGroup(ctx, pool, keyID, outboxID, indices, items, results, turnsErr == nil, check)
 			return nil
 		})
 	}
@@ -245,13 +253,14 @@ func embedInTEIMaxBatches(ctx context.Context, teiURL, apiKey string, texts []st
 // stageGroup validates and lease-checks every chunk belonging to one
 // outbox row, stages each valid one in volunteer_submissions, and then —
 // only if every chunk the job's CURRENT description actually expects was
-// staged, no more and no fewer — decides once whether this job's
-// submission needs a spot-check. A skip decision is finished immediately
+// staged, no more and no fewer — acts on check, the decision Submit made
+// from this group's turn (decidable is false when no turn could be
+// claimed). A skip decision is finished immediately
 // (no TEI call needed at all); a check decision returns a *pendingGroup
 // for the batched TEI call. An incomplete or otherwise undecidable group
 // returns nil: every chunk that did stage is left "pending" for a later
 // pass, same as any other verification hiccup.
-func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, indices []int, items []Item, results []Result, cfg config.Config) *pendingGroup {
+func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, indices []int, items []Item, results []Result, decidable, check bool) *pendingGroup {
 	jobID := items[indices[0]].JobID
 	staged := map[int]stagedItem{} // by chunk_index
 
@@ -282,15 +291,11 @@ func stageGroup(ctx context.Context, pool *pgxpool.Pool, keyID, outboxID int64, 
 		return nil
 	}
 
-	// Taken only once the job is decidable, so an incomplete chunk set
-	// spends no turn.
-	turn, consecutivePasses, err := reputation.TakeTurn(ctx, pool, keyID)
-	if err != nil {
-		log.Printf("submit: key %d: %v (leaving %d staged chunk(s) pending)", keyID, err, len(staged))
-		return nil
+	if !decidable {
+		return nil // no turn could be claimed: leave what staged for a later pass
 	}
 
-	if !reputation.ShouldCheck(turn, consecutivePasses, cfg) {
+	if !check {
 		finishSkipped(ctx, pool, keyID, outboxID, jobID, staged)
 		return nil
 	}

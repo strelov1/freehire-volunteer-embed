@@ -13,8 +13,8 @@ import "github.com/strelov1/freehire-volunteer-embed/internal/config"
 // long the streak has run, using totalEvaluated as a deterministic
 // counter so the rate never collapses to zero.
 //
-// Contract for callers: totalEvaluated must be the turn TakeTurn returned
-// for this one submission — a value no other submission saw, and already
+// Contract for callers: totalEvaluated must be the turn TakeTurns handed
+// this one submission — a value no other submission saw, and already
 // advanced whether or not the check is performed or finishes. Advancing it
 // only when a check is actually performed would let the counter settle on
 // a value that is never a multiple of the active divisor, permanently

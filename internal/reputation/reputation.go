@@ -29,29 +29,32 @@ func IsBanned(ctx context.Context, pool *pgxpool.Pool, keyID int64) (bool, error
 	return bannedAt != nil, nil
 }
 
-// TakeTurn claims a key's next check-decision turn: it advances
-// total_evaluated by one and returns the value it held BEFORE (zero for a
-// key that has never submitted) along with consecutive_passes, in one
-// atomic statement. The turn is what ShouldCheck decides on, and claiming
-// it is the only thing that advances total_evaluated.
+// TakeTurns claims a key's next n check-decision turns: it advances
+// total_evaluated by n and returns the first turn — the value it held
+// BEFORE, zero for a key that has never submitted — along with
+// consecutive_passes, in one atomic statement. The caller hands turns
+// first..first+n-1 out one per submission, and ShouldCheck decides on
+// each. Claiming turns is the only thing that advances total_evaluated.
 //
 // Reading the counters and advancing them later, once the outcome was
 // known, made two failures (2026-10-18): concurrent groups in one batch all
 // read the same value and so all reached the same decision — once in every
 // divisor batches the whole batch was re-embedded through the trusted TEI —
 // and a check the TEI could not finish advanced nothing, so the next
-// submission landed on the same "check" turn again.
-func TakeTurn(ctx context.Context, pool *pgxpool.Pool, keyID int64) (turn, consecutivePasses int, err error) {
+// submission landed on the same "check" turn again. One statement per
+// batch rather than per job also keeps the key's row from becoming a lock
+// every job of the batch queues behind.
+func TakeTurns(ctx context.Context, pool *pgxpool.Pool, keyID int64, n int) (first, consecutivePasses int, err error) {
 	err = pool.QueryRow(ctx, `
 		INSERT INTO volunteer_reputation (key_id, total_evaluated)
-		VALUES ($1, 1)
+		VALUES ($1, $2)
 		ON CONFLICT (key_id) DO UPDATE SET
-			total_evaluated = volunteer_reputation.total_evaluated + 1,
+			total_evaluated = volunteer_reputation.total_evaluated + $2,
 			updated_at = now()
-		RETURNING total_evaluated - 1, consecutive_passes
-	`, keyID).Scan(&turn, &consecutivePasses)
+		RETURNING total_evaluated - $2, consecutive_passes
+	`, keyID, n).Scan(&first, &consecutivePasses)
 	if err != nil {
-		return 0, 0, fmt.Errorf("reputation: take turn for key %d: %w", keyID, err)
+		return 0, 0, fmt.Errorf("reputation: take %d turns for key %d: %w", n, keyID, err)
 	}
-	return turn, consecutivePasses, nil
+	return first, consecutivePasses, nil
 }

@@ -12,7 +12,7 @@ import (
 const banThreshold = 3
 
 // RecordPassed records a submission that was actually re-embedded and
-// matched. It leaves total_evaluated alone: TakeTurn already advanced it
+// matched. It leaves total_evaluated alone: TakeTurns already advanced it
 // when the check was decided.
 func RecordPassed(ctx context.Context, pool *pgxpool.Pool, keyID int64) error {
 	_, err := pool.Exec(ctx, `

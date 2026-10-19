@@ -568,7 +568,7 @@ func TestSubmit_ManyItemsNeedingVerification_OneSharedTEICall(t *testing.T) {
 // TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates guards
 // against the obvious risk of making Submit concurrent: multiple goroutines
 // incrementing the same key's reputation row must not lose updates to a
-// naive, non-atomic read-modify-write race. TakeTurn is a single atomic
+// naive, non-atomic read-modify-write race. TakeTurns is a single atomic
 // SQL upsert, so Postgres's row lock should serialize these
 // correctly regardless of Go-level concurrency — this proves it.
 func TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates(t *testing.T) {
@@ -584,7 +584,7 @@ func TestSubmit_ConcurrentItemsSameKey_ReputationCounterHasNoLostUpdates(t *test
 	// it's proving), and the whole climbed range -- seed..seed+itemCount --
 	// avoids any multiple of 30 so no item needs a real check against the
 	// deliberately unreachable TEI (31..51 contains none) — not that a
-	// deferred check would stop the count any more: TakeTurn advances it
+	// deferred check would stop the count any more: TakeTurns advances it
 	// whatever happens to the check.
 	const seedTotalEvaluated = 31
 	if _, err := pool.Exec(ctx, `

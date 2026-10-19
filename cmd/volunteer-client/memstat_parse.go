@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -48,39 +47,21 @@ func parseMemInfoValue(line string) (uint64, bool) {
 	return v, true
 }
 
-var vmStatFieldPattern = regexp.MustCompile(`^(Pages \w+):\s+(\d+)\.`)
-
-// parseDarwinVMStat computes the available-memory fraction from `vm_stat`'s
-// output. "Available" has no single authoritative definition on macOS;
-// free + inactive + speculative pages is a common, deliberately
-// conservative approximation of memory that can be reclaimed or reused
-// without swapping -- good enough for a safety signal, not meant to match
-// Activity Monitor exactly.
-func parseDarwinVMStat(output string, pageSize, totalMemBytes uint64) (float64, error) {
-	if totalMemBytes == 0 {
-		return 0, fmt.Errorf("memstat: totalMemBytes must not be zero")
+// parseDarwinMemoryStatusLevel reads `sysctl -n kern.memorystatus_level`:
+// the kernel's own percentage of memory available before it starts
+// applying pressure, the same figure `memory_pressure` prints as
+// "System-wide memory free percentage". It counts the file cache macOS
+// will give back on demand. Summing vm_stat's free, inactive and
+// speculative pages instead missed that cache: on a 32 GB Mac with 27%
+// free it read 14%, below lowMemoryHoldFraction, so the chunk size could
+// never grow past wherever it last shrank to — one text per call.
+func parseDarwinMemoryStatusLevel(output string) (float64, error) {
+	level, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return 0, fmt.Errorf("memstat: parse kern.memorystatus_level: %w", err)
 	}
-
-	fields := map[string]uint64{}
-	for _, line := range strings.Split(output, "\n") {
-		m := vmStatFieldPattern.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		v, err := strconv.ParseUint(m[2], 10, 64)
-		if err != nil {
-			continue
-		}
-		fields[m[1]] = v
+	if level < 0 || level > 100 {
+		return 0, fmt.Errorf("memstat: kern.memorystatus_level = %d, want 0..100", level)
 	}
-
-	free, haveFree := fields["Pages free"]
-	inactive, haveInactive := fields["Pages inactive"]
-	speculative, haveSpeculative := fields["Pages speculative"]
-	if !haveFree || !haveInactive || !haveSpeculative {
-		return 0, fmt.Errorf("memstat: vm_stat output missing one of free/inactive/speculative pages")
-	}
-
-	availableBytes := (free + inactive + speculative) * pageSize
-	return float64(availableBytes) / float64(totalMemBytes), nil
+	return float64(level) / 100, nil
 }

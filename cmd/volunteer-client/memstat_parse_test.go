@@ -45,50 +45,20 @@ MemAvailable:    not-a-number kB
 	}
 }
 
-func TestParseDarwinVMStat_RealFormat_ReturnsAvailableFraction(t *testing.T) {
-	// Captured from a real `vm_stat` run during this project's own
-	// development.
-	fixture := `Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages free:                                     4594.
-Pages active:                                 311675.
-Pages inactive:                               302381.
-Pages speculative:                              8854.
-Pages throttled:                                   0.
-Pages wired down:                             232345.
-`
-	const pageSize = 16384
-	const totalMemBytes = 16 * 1024 * 1024 * 1024 // 16 GiB
-
-	got, err := parseDarwinVMStat(fixture, pageSize, totalMemBytes)
+func TestParseDarwinMemoryStatusLevel_ReturnsFraction(t *testing.T) {
+	got, err := parseDarwinMemoryStatusLevel("27\n")
 	if err != nil {
-		t.Fatalf("parseDarwinVMStat: %v", err)
+		t.Fatalf("parseDarwinMemoryStatusLevel: %v", err)
 	}
-
-	availablePages := uint64(4594 + 302381 + 8854) // free + inactive + speculative
-	want := float64(availablePages*pageSize) / float64(totalMemBytes)
-	if diff := got - want; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("fraction = %v, want %v", got, want)
+	if got != 0.27 {
+		t.Errorf("fraction = %v, want 0.27", got)
 	}
 }
 
-func TestParseDarwinVMStat_MissingField_ReturnsError(t *testing.T) {
-	fixture := `Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages active:                                 311675.
-`
-	_, err := parseDarwinVMStat(fixture, 16384, 16*1024*1024*1024)
-	if err == nil {
-		t.Fatal("expected an error when Pages free is missing, got nil")
-	}
-}
-
-func TestParseDarwinVMStat_ZeroTotalMemBytes_ReturnsError(t *testing.T) {
-	fixture := `Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages free:                                     4594.
-Pages inactive:                               302381.
-Pages speculative:                              8854.
-`
-	_, err := parseDarwinVMStat(fixture, 16384, 0)
-	if err == nil {
-		t.Fatal("expected an error for zero total memory, got nil")
+func TestParseDarwinMemoryStatusLevel_Malformed_ReturnsError(t *testing.T) {
+	for _, in := range []string{"", "not-a-number", "-1", "101"} {
+		if _, err := parseDarwinMemoryStatusLevel(in); err == nil {
+			t.Errorf("parseDarwinMemoryStatusLevel(%q): expected an error, got nil", in)
+		}
 	}
 }
